@@ -1,0 +1,38 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+## Workflow expectations
+1. **Initial planning**
+   - When a request is non‑trivial, draft a high‑level plan first.  
+   - Break work into ≤ 15 checklist items (`- [ ] task`), grouped by milestone.
+
+2. **`.notes/` directory ownership**
+   - If `.notes/` does not exist at repo root, create it.  
+   - Inside `.notes/`, the agent may freely create, edit, or delete Markdown files.  
+   - Keep a single `index.md` summarising active notes; move stale notes to `_archive/` or delete them.
+
+3. **Checklists—lightweight, not bureaucratic**
+   - Keep checklists current; an unchecked item older than one week signals the plan needs revisiting.  
+   - Collapse or remove completed lists instead of keeping pages of obsolete ticks.
+
+4. **Web scouting before implementation**
+   - For every major library, framework, or API decision, perform a quick web lookup:  
+     1. Retrieve latest stable version and ecosystem health.  
+     2. Note any breaking‑change alerts.  
+   - Summarise findings in the relevant note before writing code.
+
+5. **Continuous note hygiene**
+   - At the end of each agent session:  
+     - Mark completed tasks with `- [x]`.  
+     - Remove or archive files that are no longer accurate.  
+     - Update `index.md` with the current status snapshot.
+
+6. **Etiquette**
+   - Prefer concise, actionable prose.  
+   - Avoid duplicating information already available in code comments or READMEs.
+
+@note‑template.md
+
+
