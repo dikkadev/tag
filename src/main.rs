@@ -5,6 +5,9 @@ use egui::Key;
 use std::error::Error;
 use eframe::egui;
 use egui::{ViewportBuilder, ViewportCommand};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, GetMonitorInfoW, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST};
 
 // New struct to hold the structured input
 #[derive(Debug, Clone, Default)]
@@ -403,11 +406,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info,tag=info")).init();
     log::info!("Starting Tag application");
 
+    // Determine the monitor's top-left origin via Win32 APIs
+    let (origin_x, origin_y) = {
+        #[cfg(target_os = "windows")]
+        {
+            // Get the global cursor position
+            let mut pt: POINT = POINT { x: 0, y: 0 };
+            unsafe { let _ = GetCursorPos(&mut pt); }
+            // Find the monitor nearest to the cursor
+            let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+            // Query monitor info
+            let mut mi = MONITORINFOEXW::default();
+            mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            unsafe { let _ = GetMonitorInfoW(hmon, &mut mi as *mut _ as *mut _); }
+            (mi.monitorInfo.rcMonitor.left as f32, mi.monitorInfo.rcMonitor.top as f32)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Default to origin if not on Windows
+            (0.0, 0.0)
+        }
+    };
+    // Apply fixed offsets from the monitor origin
+    let offset_x = 250.0; // swapped horizontal padding
+    let offset_y = 100.0; // swapped vertical padding
+    let start_x = origin_x + offset_x;
+    let start_y = origin_y + offset_y;
+    log::info!("Calculated initial window position: ({}, {})", start_x, start_y);
+
+    // Configure initial window position and size
     let initial_width = 500.0; // Restore desired initial width
 
     let options = eframe::NativeOptions {
-        // Set initial width, let height adapt
-        viewport: ViewportBuilder::default().with_inner_size([initial_width, 100.0]), // Height here is just a placeholder, will be overridden
+        viewport: ViewportBuilder::default()
+            .with_inner_size([initial_width, 100.0]) // Height is placeholder, will be overridden
+            .with_position([start_x, start_y]), // Set initial position relative to monitor
         ..Default::default()
     };
 
@@ -418,6 +451,3 @@ fn main() -> Result<(), Box<dyn Error>> {
     )
     .map_err(|e| Box::new(e) as Box<dyn Error>)
 }
-
-// Ensure old main based on winit is removed or commented out if merging.
-// The code above assumes replacing the winit loop with eframe::run_native.
