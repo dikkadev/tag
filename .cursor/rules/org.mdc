@@ -33,6 +33,4 @@ alwaysApply: true
    - Prefer concise, actionable prose.  
    - Avoid duplicating information already available in code comments or READMEs.
 
-@note‑template.md
-
 

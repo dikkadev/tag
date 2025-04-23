@@ -17,6 +17,9 @@ unicode-xid = "0.2.6"
 xml-rs = "0.8.26"
 mouse_position = "0.1.4"
 windows = { version = "0.61.1", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+enigo = "0.3.0"
+active-win-pos-rs = "0.9.0"
+winapi = { version = "0.3.9", features = ["winuser"] }
 
 [profile.release]
 opt-level = 3

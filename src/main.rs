@@ -8,12 +8,35 @@ use egui::{ViewportBuilder, ViewportCommand};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, GetMonitorInfoW, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST};
+// Add imports for keyboard simulation and active window detection
+use active_win_pos_rs::get_active_window;
+use std::fs::File;
+use std::io::Write;
+use std::process::Command;
 
 // New struct to hold the structured input
 #[derive(Debug, Clone, Default)]
 struct InputState {
     tag: String,
     attributes: Vec<(String, String)>,
+}
+
+// New struct to hold the previous active window information
+#[derive(Debug, Clone)]
+struct PreviousActiveWindow {
+    title: String,
+    app_name: String,
+    window_id: String,
+}
+
+impl Default for PreviousActiveWindow {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            app_name: String::new(),
+            window_id: String::new(),
+        }
+    }
 }
 
 struct App {
@@ -23,11 +46,23 @@ struct App {
     tag_field_id: egui::Id, // Store the Id of the tag field for focus
     should_focus_tag: bool, // Flag to request focus on next frame
     focus_next_frame: Option<egui::Id>, // ID to focus on the next frame
+    previous_active_window: Option<PreviousActiveWindow>, // Store previous active window info
 }
 
 impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let tag_field_id = egui::Id::new("tag_field"); // Create unique ID for the tag field
+        
+        // Get the active window before opening our window
+        let previous_active_window = match get_active_window() {
+            Ok(window) => Some(PreviousActiveWindow {
+                title: window.title,
+                app_name: window.app_name,
+                window_id: window.window_id,
+            }),
+            Err(_) => None,
+        };
+        
         Self {
             input_state: InputState::default(), // Initialize the new struct
             has_parse_error: false,
@@ -35,7 +70,23 @@ impl App {
             tag_field_id,
             should_focus_tag: true, // Focus on the first frame
             focus_next_frame: None, // Initialize to None
+            previous_active_window,
         }
+    }
+
+    /// Copy the XML to clipboard
+    fn copy_to_clipboard(&mut self, xml: String) -> Result<(), Box<dyn Error>> {
+        // Lazy initialize clipboard if it doesn't exist
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new()?);
+        }
+        
+        // Set the text to clipboard
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            clipboard.set_text(xml)?;
+        }
+        
+        Ok(())
     }
 }
 
@@ -124,6 +175,58 @@ fn generate_xml(data: &ParsedData) -> String {
     format!("<{}{}>\n\n</{}>", data.tag, attributes_string, data.tag)
 }
 
+// Function to create and execute a typing helper script
+fn create_typing_script(xml: &str) -> Result<(), Box<dyn Error>> {
+    // Create a temporary batch file
+    let bat_path = std::env::temp_dir().join("tag_typer.bat");
+    let ps_path = std::env::temp_dir().join("tag_typer.ps1");
+    
+    // Create PowerShell script for typing
+    let mut ps_file = File::create(&ps_path)?;
+    
+    // Split XML into lines
+    let lines: Vec<&str> = xml.lines().collect();
+    
+    // Write PowerShell script content
+    writeln!(ps_file, "# Wait for the parent process to exit")?;
+    writeln!(ps_file, "Start-Sleep -Milliseconds 500")?;
+    
+    // Add typing code using SendKeys to type the XML
+    writeln!(ps_file, "# Load the Windows Forms assembly for SendKeys")?;
+    writeln!(ps_file, "Add-Type -AssemblyName System.Windows.Forms")?;
+    
+    // Type opening tag
+    if lines.len() >= 1 {
+        writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{}\")", lines[0].replace("\"", "\"\""))?;
+    }
+    
+    // Type first line break (Shift+Enter)
+    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"+~\")")?;
+    
+    // Type second line break (Shift+Enter)
+    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"+~\")")?;
+    
+    // Type closing tag
+    if lines.len() >= 3 {
+        writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{}\")", lines[2].replace("\"", "\"\""))?;
+    }
+    
+    // Move cursor to content area (typically up-arrow to go from closing tag to content area)
+    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{{UP}}\")")?;
+    
+    // Create batch file to run PowerShell script hidden
+    let mut bat_file = File::create(&bat_path)?;
+    writeln!(bat_file, "@echo off")?;
+    writeln!(bat_file, "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\"", ps_path.to_string_lossy())?;
+    
+    // Execute the batch file
+    Command::new("cmd")
+        .args(&["/C", "start", "/b", bat_path.to_string_lossy().as_ref()])
+        .spawn()?;
+    
+    Ok(())
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         // --- Focus Handling --- 
@@ -190,51 +293,53 @@ impl eframe::App for App {
                 }
            }
 
-           if i.key_pressed(Key::Enter) && i.modifiers.is_none() { // Enter without modifiers
-               log::info!("Enter pressed, attempting to generate XML and copy.");
-
-               // Lazy initialize clipboard if it doesn't exist
-               if self.clipboard.is_none() {
-                   match arboard::Clipboard::new() {
-                       Ok(cb) => self.clipboard = Some(cb),
-                       Err(e) => {
-                           log::error!("Failed to initialize clipboard: {}", e);
-                           // Set error state and potentially break or show a persistent error?
-                           self.has_parse_error = true;
-                           // Can't proceed without clipboard, maybe return early from this closure?
-                           // For now, just log and let the match below handle the None case.
-                       }
-                   }
-               }
+           if i.key_pressed(Key::Enter) {
+               // Check if Control modifier is pressed
+               let ctrl_pressed = i.modifiers.ctrl;
+               log::info!("Enter pressed with ctrl: {}", ctrl_pressed);
 
                match build_parsed_data(&self.input_state) {
                    Ok(parsed_data) => {
                        let generated_xml = generate_xml(&parsed_data);
                        log::info!("Generated XML:\n{}", generated_xml);
 
-                       // Use the clipboard if it was initialized successfully
-                       if let Some(clipboard) = self.clipboard.as_mut() {
-                           if let Err(e) = clipboard.set_text(generated_xml.clone()) {
+                       if ctrl_pressed {
+                           // Ctrl+Enter: Copy to clipboard
+                           if let Err(e) = self.copy_to_clipboard(generated_xml.clone()) {
                                log::error!("Failed to copy to clipboard: {}", e);
                                self.has_parse_error = true;
                            } else {
-                                log::info!("Copied XML to clipboard.");
-                                self.has_parse_error = false;
-                                // Drop the clipboard handle *before* spawning the close thread
-                                drop(self.clipboard.take());
-                                // Spawn a thread to send the close command (workaround for eframe <= 0.28 deadlock)
-                                let ctx_clone = ctx.clone();
-                                std::thread::spawn(move || {
-                                    log::info!("Sending close command from separate thread.");
-                                    ctx_clone.send_viewport_cmd(ViewportCommand::Close);
-                                });
-                                // No need to request repaint here, as we are closing
-                                return; // Exit update early after spawning close thread
+                               log::info!("Copied XML to clipboard.");
+                               self.has_parse_error = false;
+                               // Drop the clipboard handle *before* spawning the close thread
+                               self.clipboard.take();
+                               // Spawn a thread to send the close command
+                               let ctx_clone = ctx.clone();
+                               std::thread::spawn(move || {
+                                   log::info!("Sending close command from separate thread.");
+                                   ctx_clone.send_viewport_cmd(ViewportCommand::Close);
+                               });
+                               return; // Exit update early after spawning close thread
                            }
                        } else {
-                           // This case handles if clipboard init failed earlier
-                           log::error!("Clipboard not available, cannot copy.");
-                           self.has_parse_error = true; // Indicate error
+                           // Regular Enter: Type the XML using external script
+                           log::info!("Setting up XML typing with external script...");
+                           
+                           // Create and execute the typing script
+                           if let Err(e) = create_typing_script(&generated_xml) {
+                               log::error!("Failed to create typing script: {}", e);
+                               self.has_parse_error = true;
+                           } else {
+                               log::info!("Typing script created and started");
+                           }
+                           
+                           // Send close command from a separate thread to avoid hanging
+                           let ctx_clone = ctx.clone();
+                           std::thread::spawn(move || {
+                               log::info!("Sending close command from separate thread.");
+                               ctx_clone.send_viewport_cmd(ViewportCommand::Close);
+                           });
+                           return; // Exit update early
                        }
                    }
                    Err(e) => {
@@ -242,7 +347,7 @@ impl eframe::App for App {
                        self.has_parse_error = true;
                    }
                }
-                ctx.request_repaint();
+               ctx.request_repaint();
            }
        });
 
@@ -255,12 +360,29 @@ impl eframe::App for App {
        // --- UI Drawing & Dynamic Resizing --- 
        let desired_height = egui::CentralPanel::default().show(ctx, |ui| {
            ui.heading("Tag XML Generator");
-           ui.add_space(4.0);
+           
+           // Display previous active window info if available
+           if let Some(prev_window) = &self.previous_active_window {
+               ui.horizontal(|ui| {
+                   // No label text, just show the window title directly
+                   // Use normal text (not smaller than other text)
+                   let title = &prev_window.title;
+                   
+                   // Use a simple approach to truncate text with ellipsis
+                   let truncated_text = if title.len() > 40 {
+                       format!("{}...", &title[0..37])
+                   } else {
+                       title.clone()
+                   };
+                   
+                   // Use regular text (not small or italic)
+                   ui.label(truncated_text);
+               });
+           }
 
-           // Input Section
-           let input_frame = egui::Frame::NONE
-               .inner_margin(egui::Margin::same(5));
-           let _frame_response = input_frame.show(ui, |ui| {
+           // Input Section - with no extra spacing
+           // Use a custom margin that removes the space
+           egui::Frame::NONE.show(ui, |ui| {
                 // Apply red border if there was a parse error
                 let stroke = if self.has_parse_error {
                    egui::Stroke::new(1.0, egui::Color32::RED)
@@ -403,7 +525,7 @@ impl eframe::App for App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info,tag=info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info,tag=debug")).init();
     log::info!("Starting Tag application");
 
     // Determine the monitor's top-left origin via Win32 APIs
