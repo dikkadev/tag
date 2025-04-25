@@ -1,0 +1,24 @@
+Let's make quite the big change to this here tool.
+
+Currently it gets the XML into the clipboard with a press of enter.
+I want to change it, so there are 2 options:
+The default, pressing just enter, should actually write the XML; more explanation for that below.
+The second option is that, pressing ctrl + enter, should give the XML to the clipboard; just like what happens now with a regular enter press.
+
+About writing the XML:
+It should use some robot library. This is the first thing we need to do, find a library that works for us.
+Then it should behave like this:
+- Close the window, the focus automatically goes to whatever hat it before, we assume that's what the user wants. (In general we do NOT assume what the user wants, we do as instructed by their actions)
+- It should, with appropriate speed, write the XML. Some contraints regarding this:
+    - It should not touch the clipboard at all.
+    - It should use shift+enter to break lines.
+    - It should end up with the cursor in the middle empty line of the xml.
+
+Let's tackle this first, but another great UI idea would be:
+Have it check which windows was focused before (idk if that's possible, maybe we can check before we open our own window?) This should not slow down our startup in any noticable way.
+Then we can displau inside the app (below the title and first input) the icon and name of whatever was focused before. Just small, same height as the other stuff. It should have ellipsis if too long (should end a padding before the right side of the window).
+
+
+Please keep the code in a nice and clean state, and focus only on the task at hand.
+You should not execute the application yourself. You should do `cargo c` from time to time to check compilation.
+If you need me to test something and confirm, tell me. But I'd like to not be bothered a lot, so gather these things, and/or don't ask me for every little thing.

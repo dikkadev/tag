@@ -10,9 +10,13 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, GetMonitorInfoW, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST};
 // Add imports for keyboard simulation and active window detection
 use active_win_pos_rs::get_active_window;
-use std::fs::File;
-use std::io::Write;
+use enigo::{Enigo, Settings, Key as EnigoKey, Keyboard, Direction};
+use std::thread;
+use std::time::Duration;
+use std::env;
+use std::fs;
 use std::process::Command;
+use std::os::windows::process::CommandExt;
 
 // New struct to hold the structured input
 #[derive(Debug, Clone, Default)]
@@ -175,58 +179,6 @@ fn generate_xml(data: &ParsedData) -> String {
     format!("<{}{}>\n\n</{}>", data.tag, attributes_string, data.tag)
 }
 
-// Function to create and execute a typing helper script
-fn create_typing_script(xml: &str) -> Result<(), Box<dyn Error>> {
-    // Create a temporary batch file
-    let bat_path = std::env::temp_dir().join("tag_typer.bat");
-    let ps_path = std::env::temp_dir().join("tag_typer.ps1");
-    
-    // Create PowerShell script for typing
-    let mut ps_file = File::create(&ps_path)?;
-    
-    // Split XML into lines
-    let lines: Vec<&str> = xml.lines().collect();
-    
-    // Write PowerShell script content
-    writeln!(ps_file, "# Wait for the parent process to exit")?;
-    writeln!(ps_file, "Start-Sleep -Milliseconds 500")?;
-    
-    // Add typing code using SendKeys to type the XML
-    writeln!(ps_file, "# Load the Windows Forms assembly for SendKeys")?;
-    writeln!(ps_file, "Add-Type -AssemblyName System.Windows.Forms")?;
-    
-    // Type opening tag
-    if lines.len() >= 1 {
-        writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{}\")", lines[0].replace("\"", "\"\""))?;
-    }
-    
-    // Type first line break (Shift+Enter)
-    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"+~\")")?;
-    
-    // Type second line break (Shift+Enter)
-    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"+~\")")?;
-    
-    // Type closing tag
-    if lines.len() >= 3 {
-        writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{}\")", lines[2].replace("\"", "\"\""))?;
-    }
-    
-    // Move cursor to content area (typically up-arrow to go from closing tag to content area)
-    writeln!(ps_file, "[System.Windows.Forms.SendKeys]::SendWait(\"{{UP}}\")")?;
-    
-    // Create batch file to run PowerShell script hidden
-    let mut bat_file = File::create(&bat_path)?;
-    writeln!(bat_file, "@echo off")?;
-    writeln!(bat_file, "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\"", ps_path.to_string_lossy())?;
-    
-    // Execute the batch file
-    Command::new("cmd")
-        .args(&["/C", "start", "/b", bat_path.to_string_lossy().as_ref()])
-        .spawn()?;
-    
-    Ok(())
-}
-
 impl eframe::App for App {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         // --- Focus Handling --- 
@@ -311,33 +263,30 @@ impl eframe::App for App {
                            } else {
                                log::info!("Copied XML to clipboard.");
                                self.has_parse_error = false;
-                               // Drop the clipboard handle *before* spawning the close thread
                                self.clipboard.take();
                                // Spawn a thread to send the close command
                                let ctx_clone = ctx.clone();
-                               std::thread::spawn(move || {
+                               thread::spawn(move || {
                                    log::info!("Sending close command from separate thread.");
                                    ctx_clone.send_viewport_cmd(ViewportCommand::Close);
                                });
                                return; // Exit update early after spawning close thread
                            }
                        } else {
-                           // Regular Enter: Type the XML using external script
-                           log::info!("Setting up XML typing with external script...");
-                           
-                           // Create and execute the typing script
-                           if let Err(e) = create_typing_script(&generated_xml) {
-                               log::error!("Failed to create typing script: {}", e);
-                               self.has_parse_error = true;
-                           } else {
-                               log::info!("Typing script created and started");
-                           }
-                           
-                           // Send close command from a separate thread to avoid hanging
+                           // Regular Enter: Close our window then type in the active window
+                           log::info!("Typing XML directly via Enigo...");
+                           let xml_clone = generated_xml.clone();
                            let ctx_clone = ctx.clone();
-                           std::thread::spawn(move || {
-                               log::info!("Sending close command from separate thread.");
-                               ctx_clone.send_viewport_cmd(ViewportCommand::Close);
+                           // Close our UI window first to restore focus
+                           ctx.send_viewport_cmd(ViewportCommand::Close);
+                           // Spawn a thread to type after a delay
+                           thread::spawn(move || {
+                               // Allow time for the window to close and focus to shift
+                               thread::sleep(Duration::from_millis(500)); // Increased delay to 500ms
+                               // Type the XML in the now-active window
+                               let mut enigo = Enigo::new(&Settings::default()).unwrap();
+                               enigo.text(&xml_clone).unwrap();
+                               enigo.key(EnigoKey::UpArrow, Direction::Click).unwrap();
                            });
                            return; // Exit update early
                        }
