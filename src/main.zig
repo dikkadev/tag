@@ -10,11 +10,56 @@ const slog = sokol.log;
 const sglue = sokol.glue;
 const sdtx = sokol.debugtext;
 
+// Parsed token data
+const Token = struct {
+    text: [256]u8 = undefined,
+    len: usize = 0,
+    
+    fn init() Token {
+        return Token{};
+    }
+    
+    fn set(self: *Token, text: []const u8) void {
+        self.len = @min(text.len, 255);
+        @memcpy(self.text[0..self.len], text[0..self.len]);
+        self.text[self.len] = 0; // null terminate
+    }
+    
+    fn slice(self: *const Token) []const u8 {
+        return self.text[0..self.len];
+    }
+    
+    fn isEmpty(self: *const Token) bool {
+        return self.len == 0;
+    }
+};
+
+const ParsedInput = struct {
+    tag_name: Token = Token.init(),
+    attributes: [16]Token = [_]Token{Token.init()} ** 16,
+    attr_count: usize = 0,
+    is_boolean: [16]bool = [_]bool{false} ** 16, // Track which attributes are boolean
+    
+    fn clear(self: *ParsedInput) void {
+        self.tag_name = Token.init();
+        self.attr_count = 0;
+        for (&self.attributes) |*attr| {
+            attr.* = Token.init();
+        }
+        for (&self.is_boolean) |*flag| {
+            flag.* = false;
+        }
+    }
+};
+
 // App state
 var input_buffer: [4096]u8 = undefined;
 var input_len: usize = 0;
 var should_close_and_process = false;
 var large_text_context: sdtx.Context = undefined;
+var parsed_data: ParsedInput = ParsedInput{};
+var xml_output: [8192]u8 = undefined;
+var xml_len: usize = 0;
 
 // Text scaling factors - adjust these to change text sizes
 var input_text_scale: f32 = 1.3;  // Higher value = smaller text
@@ -44,7 +89,10 @@ export fn init() void {
     @memset(&input_buffer, 0);
     input_len = 0;
     
-    std.log.info("Tag UI initialized with text rendering", .{});
+    // Initialize the XML output with placeholder
+    parseInput();
+    
+    std.log.info("Tag UI initialized with XML generation", .{});
 }
 
 export fn frame() void {
@@ -59,19 +107,19 @@ export fn frame() void {
         .swapchain = sglue.swapchain(),
     });
     
-    // First, render the larger input text using the large text context
+    // First, render the larger XML text using the large text context
     sdtx.setContext(large_text_context);
     sdtx.canvas(@as(f32, @floatFromInt(sapp.width())) / input_text_scale, @as(f32, @floatFromInt(sapp.height())) / input_text_scale);
     
-    // Render typed text starting from top left
+    // Render generated XML starting from top left
     sdtx.pos(0.5, 1.0);
     sdtx.color3f(0.9, 0.9, 0.6);
     
-    if (input_len > 0) {
-        // Create null-terminated string for display
-        input_buffer[input_len] = 0; // Ensure null termination
-        const text_slice: [:0]const u8 = input_buffer[0..input_len :0];
-        sdtx.puts(text_slice);
+    // Display the generated XML instead of raw input
+    if (xml_len > 0) {
+        xml_output[xml_len] = 0; // Ensure null termination
+        const xml_slice: [:0]const u8 = xml_output[0..xml_len :0];
+        sdtx.puts(xml_slice);
     } else {
         sdtx.puts("(type something...)");
     }
@@ -124,6 +172,7 @@ export fn frame() void {
 fn processTextAndClose() void {
     std.log.info("🔄 Processing typed text before closing...", .{});
     std.log.info("📝 Final text content: '{s}'", .{input_buffer[0..input_len]});
+    std.log.info("🏷️  Final generated XML: '{s}'", .{xml_output[0..xml_len]});
     
     // Here you can add any processing logic you need
     // For example: save to file, send to clipboard, etc.
@@ -150,9 +199,9 @@ export fn event(e: [*c]const sapp.Event) void {
                 const is_shift = (modifiers & 0x01) != 0;
                 
                 if (is_ctrl or is_shift) {
-                    std.log.info("📋 CLIPBOARD: '{s}'", .{input_buffer[0..input_len]});
+                    std.log.info("📋 CLIPBOARD: '{s}'", .{xml_output[0..xml_len]});
                     // In a real app, you'd copy to system clipboard here
-                    std.log.info("🏁 Final typed text: '{s}'", .{input_buffer[0..input_len]});
+                    std.log.info("🏁 Final generated XML: '{s}'", .{xml_output[0..xml_len]});
                     sapp.quit();
                 } else {
                     // Regular enter now closes and processes
@@ -167,6 +216,7 @@ export fn event(e: [*c]const sapp.Event) void {
                 if (input_len < input_buffer.len - 1) {
                     input_buffer[input_len] = '\t';
                     input_len += 1;
+                    parseInput(); // Update XML when input changes
                     std.log.info("⇥ Added tab character", .{});
                 }
                 return;
@@ -176,6 +226,7 @@ export fn event(e: [*c]const sapp.Event) void {
                 if (input_len > 0) {
                     input_len -= 1;
                     input_buffer[input_len] = 0;
+                    parseInput(); // Update XML when input changes
                     std.log.info("⌫ Backspace", .{});
                 }
                 return;
@@ -188,6 +239,7 @@ export fn event(e: [*c]const sapp.Event) void {
                 if (char != 0) {
                     input_buffer[input_len] = char;
                     input_len += 1;
+                    parseInput(); // Update XML when input changes
                     std.log.info("✏️  Added '{c}'", .{char});
                 }
             }
@@ -278,27 +330,229 @@ pub fn main() void {
     });
 }
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+test "simple tag" {
+    const result = parseInputString("moin");
+    const expected = "<moin>\n\n</moin>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
 }
 
-test "use other module" {
-    try std.testing.expectEqual(@as(i32, 150), lib.add(100, 50));
+test "key-value pair" {
+    const result = parseInputString("moin\tfrom\tblah blah");
+    const expected = "<moin from=\"blah blah\">\n\n</moin>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
 }
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+test "boolean and key-value mixed" {
+    const result = parseInputString("log\tproduction\t\tfrom\tnginx");
+    const expected = "<log production from=\"nginx\">\n\n</log>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "multiple boolean attributes" {
+    const result = parseInputString("div\tclass\t\tid\t\thidden");
+    const expected = "<div class id hidden>\n\n</div>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
 }
 
 /// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
 const lib = @import("zig_lib");
+
+// Parse the input buffer and populate parsed_data
+fn parseInput() void {
+    parsed_data.clear();
+    
+    if (input_len == 0) {
+        generateXML();
+        return;
+    }
+    
+    // Split by tabs to get tokens
+    var tokens: [32]Token = [_]Token{Token.init()} ** 32;
+    var token_count: usize = 0;
+    
+    var start: usize = 0;
+    var i: usize = 0;
+    
+    while (i <= input_len) : (i += 1) {
+        if (i == input_len or input_buffer[i] == '\t') {
+            // Always add a token, even if empty (for consecutive tabs)
+            if (token_count < 32) {
+                if (start < i) {
+                    tokens[token_count].set(input_buffer[start..i]);
+                } // else leave it empty for consecutive tabs
+                token_count += 1;
+            }
+            start = i + 1;
+        }
+    }
+    
+    // First token is always the tag name
+    if (token_count > 0) {
+        parsed_data.tag_name.set(cleanTagName(tokens[0].slice()));
+        
+        // Process remaining tokens as attributes
+        var attr_idx: usize = 0;
+        var i_token: usize = 1;
+        
+        while (i_token < token_count and attr_idx < 16) {
+            // Skip any empty tokens at the start
+            while (i_token < token_count and tokens[i_token].isEmpty()) {
+                i_token += 1;
+            }
+            
+            if (i_token >= token_count) break;
+            
+            // Current token is an attribute name
+            const attr_name = cleanAttributeName(tokens[i_token].slice());
+            parsed_data.attributes[attr_idx].set(attr_name);
+            i_token += 1;
+            
+            // Check the next token to see if it's a value
+            if (i_token < token_count) {
+                if (tokens[i_token].isEmpty()) {
+                    // Next token is empty - this attribute is boolean
+                    parsed_data.is_boolean[attr_idx] = true;
+                    // Skip the empty token
+                    i_token += 1;
+                } else {
+                    // Next token is non-empty - this is the value for the attribute
+                    parsed_data.is_boolean[attr_idx] = false;
+                    if (attr_idx + 1 < 16) {
+                        const attr_value = tokens[i_token].slice();
+                        parsed_data.attributes[attr_idx + 1].set(attr_value);
+                        attr_idx += 1; // Extra increment for the value
+                    }
+                    i_token += 1;
+                }
+            } else {
+                // No next token - this attribute is boolean by default
+                parsed_data.is_boolean[attr_idx] = true;
+            }
+            
+            attr_idx += 1;
+        }
+        
+        parsed_data.attr_count = attr_idx;
+    }
+    
+    generateXML();
+}
+
+// Clean tag/attribute names: spaces -> underscores, trim whitespace
+fn cleanTagName(input: []const u8) []const u8 {
+    var cleaned: [256]u8 = undefined;
+    var cleaned_len: usize = 0;
+    
+    // Trim and clean
+    const trimmed = std.mem.trim(u8, input, " \t\n\r");
+    for (trimmed) |char| {
+        if (cleaned_len >= 255) break;
+        if (char == ' ') {
+            cleaned[cleaned_len] = '_';
+        } else if ((char >= 'A' and char <= 'Z') or 
+                   (char >= 'a' and char <= 'z') or 
+                   (char >= '0' and char <= '9') or 
+                   char == '_' or char == '-') {
+            cleaned[cleaned_len] = char;
+        }
+        cleaned_len += 1;
+    }
+    
+    return cleaned[0..cleaned_len];
+}
+
+fn cleanAttributeName(input: []const u8) []const u8 {
+    return cleanTagName(input); // Same cleaning rules for now
+}
+
+// Generate XML from parsed data
+fn generateXML() void {
+    xml_len = 0;
+    
+    if (parsed_data.tag_name.isEmpty()) {
+        // Show placeholder if no input
+        const placeholder = "(type something...)";
+        @memcpy(xml_output[0..placeholder.len], placeholder);
+        xml_len = placeholder.len;
+        return;
+    }
+    
+    const tag_name = parsed_data.tag_name.slice();
+    
+    // Build opening tag with attributes
+    appendToXML("<");
+    appendToXML(tag_name);
+    
+    // Add attributes using boolean flags
+    var i: usize = 0;
+    while (i < parsed_data.attr_count) {
+        if (!parsed_data.attributes[i].isEmpty()) {
+            appendToXML(" ");
+            appendToXML(parsed_data.attributes[i].slice()); // attribute name
+            
+            if (!parsed_data.is_boolean[i]) {
+                // This is a key-value pair, next slot has the value
+                if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
+                    appendToXML("=\"");
+                    appendToXML(parsed_data.attributes[i + 1].slice());
+                    appendToXML("\"");
+                    i += 2; // Skip both name and value
+                } else {
+                    // Something went wrong, treat as boolean
+                    i += 1;
+                }
+            } else {
+                // This is a boolean attribute
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    
+    appendToXML(">\n\n</");
+    appendToXML(tag_name);
+    appendToXML(">");
+}
+
+fn appendToXML(text: []const u8) void {
+    const remaining = xml_output.len - xml_len;
+    const to_copy = @min(text.len, remaining);
+    if (to_copy > 0) {
+        @memcpy(xml_output[xml_len..xml_len + to_copy], text[0..to_copy]);
+        xml_len += to_copy;
+    }
+}
+
+// Test function to parse input string and return XML
+fn parseInputString(input: []const u8) [8192]u8 {
+    // Save current state
+    const saved_input_len = input_len;
+    const saved_input_buffer = input_buffer;
+    const saved_xml_len = xml_len;
+    const saved_xml_output = xml_output;
+    
+    // Set up test input
+    input_len = @min(input.len, input_buffer.len - 1);
+    @memcpy(input_buffer[0..input_len], input[0..input_len]);
+    
+    // Parse and generate XML
+    parseInput();
+    
+    // Save result
+    var result: [8192]u8 = undefined;
+    @memcpy(result[0..xml_len], xml_output[0..xml_len]);
+    @memset(result[xml_len..], 0);
+    
+    // Restore state
+    input_len = saved_input_len;
+    input_buffer = saved_input_buffer;
+    xml_len = saved_xml_len;
+    xml_output = saved_xml_output;
+    
+    return result;
+}
