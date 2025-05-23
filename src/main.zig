@@ -85,6 +85,111 @@ extern "kernel32" fn GlobalUnlock(hMem: windows.HANDLE) windows.BOOL;
 const CF_TEXT: u32 = 1;
 const GMEM_MOVEABLE: u32 = 0x0002;
 
+// Windows multi-monitor API declarations
+extern "user32" fn GetCursorPos(lpPoint: *POINT) windows.BOOL;
+extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) ?windows.HANDLE;
+extern "user32" fn GetMonitorInfoW(hMonitor: windows.HANDLE, lpmi: *MONITORINFO) windows.BOOL;
+extern "user32" fn FindWindowW(lpClassName: ?[*:0]const u16, lpWindowName: ?[*:0]const u16) ?windows.HWND;
+extern "user32" fn SetWindowPos(hWnd: windows.HWND, hWndInsertAfter: ?windows.HWND, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) windows.BOOL;
+
+const POINT = extern struct {
+    x: i32,
+    y: i32,
+};
+
+const RECT = extern struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+const MONITORINFO = extern struct {
+    cbSize: u32,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: u32,
+};
+
+const MONITOR_DEFAULTTONEAREST: u32 = 0x00000002;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+
+// Track desired window position based on mouse location at startup
+var desired_window_x: i32 = 0;
+var desired_window_y: i32 = 0;
+var window_position_calculated = false;
+var window_positioned = false;
+
+fn calculateDesiredWindowPosition() void {
+    if (@import("builtin").target.os.tag != .windows or window_position_calculated) {
+        return; // Only works on Windows, and only calculate once
+    }
+    
+    // Get current mouse cursor position
+    var cursor_pos: POINT = undefined;
+    if (GetCursorPos(&cursor_pos) == 0) {
+        std.log.warn("Failed to get cursor position", .{});
+        return;
+    }
+    
+    // Find the monitor containing the cursor
+    const hMonitor = MonitorFromPoint(cursor_pos, MONITOR_DEFAULTTONEAREST) orelse {
+        std.log.warn("Failed to get monitor from cursor position", .{});
+        return;
+    };
+    
+    // Get monitor information
+    var monitor_info: MONITORINFO = undefined;
+    monitor_info.cbSize = @sizeOf(MONITORINFO);
+    if (GetMonitorInfoW(hMonitor, &monitor_info) == 0) {
+        std.log.warn("Failed to get monitor information", .{});
+        return;
+    }
+    
+    // Calculate position for top-left area of the target monitor (not centered)
+    const margin_x: i32 = 50;  // Some margin from the edge
+    const margin_y: i32 = 50;  // Some margin from the top
+    
+    desired_window_x = monitor_info.rcWork.left + margin_x;
+    desired_window_y = monitor_info.rcWork.top + margin_y;
+    
+    window_position_calculated = true;
+    std.log.info("🖥️  Calculated window position for monitor containing mouse cursor: ({}, {})", .{ desired_window_x, desired_window_y });
+}
+
+fn positionWindowOnMouseMonitor() void {
+    if (@import("builtin").target.os.tag != .windows or window_positioned) {
+        return; // Only works on Windows, and only do it once
+    }
+    
+    if (!window_position_calculated) {
+        return; // Position not calculated yet
+    }
+    
+    // Find our window using the window title
+    const window_title_utf16 = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, "Tag - Text Input UI") catch {
+        std.log.warn("Failed to convert window title to UTF-16", .{});
+        return;
+    };
+    defer std.heap.page_allocator.free(window_title_utf16);
+    
+    const hwnd = FindWindowW(null, window_title_utf16.ptr) orelse {
+        // Window might not be ready yet, try again next frame
+        return;
+    };
+    
+    // Position the window at the calculated location
+    if (SetWindowPos(hwnd, null, desired_window_x, desired_window_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) {
+        std.log.warn("Failed to position window", .{});
+        return;
+    }
+    
+    window_positioned = true;
+    std.log.info("🖥️  Positioned window at ({}, {}) on monitor containing mouse cursor", .{ desired_window_x, desired_window_y });
+}
+
 export fn init() void {
     sgfx.setup(.{
         .environment = sglue.environment(),
@@ -116,6 +221,9 @@ export fn init() void {
 }
 
 export fn frame() void {
+    // Position window on the monitor where the mouse cursor is located (only once)
+    positionWindowOnMouseMonitor();
+    
     // Begin pass with gray background
     sgfx.beginPass(.{
         .action = .{
@@ -354,6 +462,9 @@ pub fn main() void {
     std.log.info("   CTRL+ENTER or SHIFT+ENTER = copy to clipboard and quit", .{});
     std.log.info("   Type to add characters", .{});
     std.log.info("", .{});
+    
+    // Calculate desired window position based on current mouse location
+    calculateDesiredWindowPosition();
     
     sapp.run(.{
         .init_cb = init,
