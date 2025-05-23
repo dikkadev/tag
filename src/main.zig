@@ -61,6 +61,8 @@ var large_text_context: sdtx.Context = undefined;
 var parsed_data: ParsedInput = ParsedInput{};
 var xml_output: [8192]u8 = undefined;
 var xml_len: usize = 0;
+var xml_display: [8192]u8 = undefined;  // Display version with better visual spacing
+var xml_display_len: usize = 0;
 
 // Text scaling factors - adjust these to change text sizes
 var input_text_scale: f32 = 1.3;  // Higher value = smaller text
@@ -133,11 +135,11 @@ export fn frame() void {
     sdtx.pos(0.5, 1.0);
     sdtx.color3f(0.9, 0.9, 0.6);
     
-    // Display the generated XML instead of raw input
-    if (xml_len > 0) {
-        xml_output[xml_len] = 0; // Ensure null termination
-        const xml_slice: [:0]const u8 = xml_output[0..xml_len :0];
-        sdtx.puts(xml_slice);
+    // Display the generated XML using enhanced display version for better visual spacing
+    if (xml_display_len > 0) {
+        xml_display[xml_display_len] = 0; // Ensure null termination
+        const xml_display_slice: [:0]const u8 = xml_display[0..xml_display_len :0];
+        sdtx.puts(xml_display_slice);
     } else {
         sdtx.puts("(type something...)");
     }
@@ -413,6 +415,7 @@ fn parseInput() void {
     
     if (input_len == 0) {
         generateXML();
+        generateXMLDisplay();
         return;
     }
     
@@ -486,6 +489,7 @@ fn parseInput() void {
     }
     
     generateXML();
+    generateXMLDisplay();
 }
 
 // Clean tag/attribute names: spaces -> underscores, trim whitespace
@@ -574,6 +578,66 @@ fn appendToXML(text: []const u8) void {
     }
 }
 
+fn appendToXMLDisplay(text: []const u8) void {
+    const remaining = xml_display.len - xml_display_len;
+    const to_copy = @min(text.len, remaining);
+    if (to_copy > 0) {
+        @memcpy(xml_display[xml_display_len..xml_display_len + to_copy], text[0..to_copy]);
+        xml_display_len += to_copy;
+    }
+}
+
+// Generate display version of XML with enhanced visual spacing for empty line
+fn generateXMLDisplay() void {
+    xml_display_len = 0;
+    
+    if (parsed_data.tag_name.isEmpty()) {
+        // Show placeholder if no input
+        const placeholder = "(type something...)";
+        @memcpy(xml_display[0..placeholder.len], placeholder);
+        xml_display_len = placeholder.len;
+        return;
+    }
+    
+    const tag_name = parsed_data.tag_name.slice();
+    
+    // Build opening tag with attributes
+    appendToXMLDisplay("<");
+    appendToXMLDisplay(tag_name);
+    
+    // Add attributes using boolean flags (same logic as original)
+    var i: usize = 0;
+    while (i < parsed_data.attr_count) {
+        if (!parsed_data.attributes[i].isEmpty()) {
+            appendToXMLDisplay(" ");
+            appendToXMLDisplay(parsed_data.attributes[i].slice()); // attribute name
+            
+            if (!parsed_data.is_boolean[i]) {
+                // This is a key-value pair, next slot has the value
+                if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
+                    appendToXMLDisplay("=\"");
+                    appendToXMLDisplay(parsed_data.attributes[i + 1].slice());
+                    appendToXMLDisplay("\"");
+                    i += 2; // Skip both name and value
+                } else {
+                    // Something went wrong, treat as boolean
+                    i += 1;
+                }
+            } else {
+                // This is a boolean attribute
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    
+    // Enhanced visual spacing for display: add extra newlines to make empty line more visible
+    appendToXMLDisplay(">\n\n\n</");  // Extra newline for better visual separation
+    appendToXMLDisplay(tag_name);
+    appendToXMLDisplay(">");
+}
+
 // Test function to parse input string and return XML
 fn parseInputString(input: []const u8) [8192]u8 {
     // Save current state
@@ -653,7 +717,7 @@ fn typeXmlWithShiftEnter(text: []const u8) !void {
             try zeys.pressAndReleaseKey(zeys.VK.VK_RETURN);
             
             // Small delay for reliability
-            std.time.sleep(5_000_000); // 5ms
+            std.time.sleep(1_000_000);
         }
         
         // Type the line content
@@ -671,7 +735,7 @@ fn executePostExitTypeAction() void {
     const xml_to_type = g_xml_data_for_typing_action.?;
     
     std.log.info("⏰ Waiting 500ms before typing...", .{});
-    std.time.sleep(500_000_000); // Sleep 500ms (500 million nanoseconds)
+    std.time.sleep(50_000_000);
     
     std.log.info("⌨️  Typing XML using Zeys...", .{});
     
