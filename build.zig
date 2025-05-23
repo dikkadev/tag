@@ -33,7 +33,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .win32_manifest = null,
     });
+    
+    // Set Windows subsystem to GUI (prevents console window)
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .Windows;
+    }
 
     // Add sokol module
     exe.root_module.addImport("sokol", sokol_dep.module("sokol"));
