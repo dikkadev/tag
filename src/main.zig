@@ -9,6 +9,7 @@ const sgfx = sokol.gfx;
 const slog = sokol.log;
 const sglue = sokol.glue;
 const sdtx = sokol.debugtext;
+const zeys = @import("zeys");
 
 // Parsed token data
 const Token = struct {
@@ -64,6 +65,23 @@ var xml_len: usize = 0;
 // Text scaling factors - adjust these to change text sizes
 var input_text_scale: f32 = 1.3;  // Higher value = smaller text
 var hint_text_scale: f32 = 1.15;   // Higher value = smaller text
+
+// Variables for post-exit type action
+var g_initiate_type_action: bool = false;
+var g_xml_data_for_typing_action: ?[]u8 = null;
+
+// Windows clipboard API declarations
+const windows = std.os.windows;
+extern "user32" fn OpenClipboard(hWndNewOwner: ?windows.HWND) windows.BOOL;
+extern "user32" fn CloseClipboard() windows.BOOL;
+extern "user32" fn EmptyClipboard() windows.BOOL;
+extern "user32" fn SetClipboardData(uFormat: u32, hMem: ?windows.HANDLE) ?windows.HANDLE;
+extern "kernel32" fn GlobalAlloc(uFlags: u32, dwBytes: usize) ?windows.HANDLE;
+extern "kernel32" fn GlobalLock(hMem: windows.HANDLE) ?*anyopaque;
+extern "kernel32" fn GlobalUnlock(hMem: windows.HANDLE) windows.BOOL;
+
+const CF_TEXT: u32 = 1;
+const GMEM_MOVEABLE: u32 = 0x0002;
 
 export fn init() void {
     sgfx.setup(.{
@@ -199,14 +217,31 @@ export fn event(e: [*c]const sapp.Event) void {
                 const is_shift = (modifiers & 0x01) != 0;
                 
                 if (is_ctrl or is_shift) {
-                    std.log.info("📋 CLIPBOARD: '{s}'", .{xml_output[0..xml_len]});
-                    // In a real app, you'd copy to system clipboard here
-                    std.log.info("🏁 Final generated XML: '{s}'", .{xml_output[0..xml_len]});
+                    // Clipboard action: copy XML to clipboard and quit
+                    std.log.info("📋 CLIPBOARD ACTION: Copying XML to clipboard", .{});
+                    const xml_slice = xml_output[0..xml_len];
+                    if (copyToClipboard(xml_slice)) {
+                        std.log.info("✅ XML copied to clipboard successfully", .{});
+                        std.log.info("📋 Clipboard content: '{s}'", .{xml_slice});
+                    } else {
+                        std.log.err("❌ Failed to copy XML to clipboard", .{});
+                    }
                     sapp.quit();
                 } else {
-                    // Regular enter now closes and processes
-                    std.log.info("📥 Regular ENTER pressed - will close and process", .{});
-                    should_close_and_process = true;
+                    // Type action: set up to type XML after window closes
+                    std.log.info("⌨️  TYPE ACTION: Setting up to type XML after exit", .{});
+                    if (xml_len > 0) {
+                        g_xml_data_for_typing_action = std.heap.page_allocator.alloc(u8, xml_len) catch |err| {
+                            std.log.err("Failed to allocate memory for type action XML: {}", .{err});
+                            return;
+                        };
+                        @memcpy(g_xml_data_for_typing_action.?, xml_output[0..xml_len]);
+                        g_initiate_type_action = true;
+                        sapp.quit();
+                    } else {
+                        std.log.warn("No XML data to type. Skipping type action.", .{});
+                        sapp.quit();
+                    }
                 }
                 return;
             }
@@ -328,6 +363,17 @@ pub fn main() void {
         .window_title = "Tag - Text Input UI",
         .logger = .{ .func = slog.func },
     });
+    
+    // Check if we need to perform post-exit type action
+    if (g_initiate_type_action) {
+        executePostExitTypeAction();
+        
+        // Free the allocated memory
+        if (g_xml_data_for_typing_action) |data| {
+            std.heap.page_allocator.free(data);
+            g_xml_data_for_typing_action = null;
+        }
+    }
 }
 
 test "simple tag" {
@@ -555,4 +601,100 @@ fn parseInputString(input: []const u8) [8192]u8 {
     xml_output = saved_xml_output;
     
     return result;
+}
+
+fn copyToClipboard(text: []const u8) bool {
+    if (OpenClipboard(null) == 0) {
+        std.log.err("Failed to open clipboard", .{});
+        return false;
+    }
+    defer _ = CloseClipboard();
+    
+    if (EmptyClipboard() == 0) {
+        std.log.err("Failed to empty clipboard", .{});
+        return false;
+    }
+    
+    // Allocate global memory for the text (including null terminator)
+    const hMem = GlobalAlloc(GMEM_MOVEABLE, text.len + 1) orelse {
+        std.log.err("Failed to allocate global memory", .{});
+        return false;
+    };
+    
+    // Lock the memory and copy text
+    if (GlobalLock(hMem)) |pMem| {
+        const dest: [*]u8 = @ptrCast(pMem);
+        @memcpy(dest[0..text.len], text);
+        dest[text.len] = 0; // null terminator
+        _ = GlobalUnlock(hMem);
+        
+        // Set clipboard data
+        if (SetClipboardData(CF_TEXT, hMem) == null) {
+            std.log.err("Failed to set clipboard data", .{});
+            return false;
+        }
+        
+        return true;
+    } else {
+        std.log.err("Failed to lock global memory", .{});
+        return false;
+    }
+}
+
+fn typeXmlWithShiftEnter(text: []const u8) !void {
+    // Type text line by line to handle newlines properly with Shift+Enter
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first_line = true;
+    
+    while (lines.next()) |line| {
+        if (!first_line) {
+            // For line breaks, use regular Enter for now
+            // TODO: Implement proper Shift+Enter when Zeys adds modifier support
+            try zeys.pressAndReleaseKey(zeys.VK.VK_RETURN);
+            
+            // Small delay for reliability
+            std.time.sleep(5_000_000); // 5ms
+        }
+        
+        // Type the line content
+        if (line.len > 0) {
+            try zeys.pressKeyString(line);
+        }
+        
+        first_line = false;
+    }
+}
+
+fn executePostExitTypeAction() void {
+    if (g_xml_data_for_typing_action == null) return;
+    
+    const xml_to_type = g_xml_data_for_typing_action.?;
+    
+    std.log.info("⏰ Waiting 500ms before typing...", .{});
+    std.time.sleep(500_000_000); // Sleep 500ms (500 million nanoseconds)
+    
+    std.log.info("⌨️  Typing XML using Zeys...", .{});
+    
+    // Type the XML string with custom line break handling
+    typeXmlWithShiftEnter(xml_to_type) catch |err| {
+        std.log.err("❌ Failed to type XML using Zeys: {}", .{err});
+        return;
+    };
+    
+    // Position cursor between the opening and closing tags
+    // Find the end of the opening tag
+    if (std.mem.indexOf(u8, xml_to_type, ">")) |opening_end| {
+        if (std.mem.indexOf(u8, xml_to_type, "</")) |closing_start| {
+            // Check if there are newlines between the tags
+            const between_tags = xml_to_type[(opening_end + 1)..closing_start];
+            if (std.mem.indexOf(u8, between_tags, "\n")) |_| {
+                // Move cursor up to position between tags
+                zeys.pressAndReleaseKey(zeys.VK.VK_UP) catch |err| {
+                    std.log.warn("⚠️  Failed to position cursor: {}", .{err});
+                };
+            }
+        }
+    }
+    
+    std.log.info("✅ Type action completed successfully!", .{});
 }

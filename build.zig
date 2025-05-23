@@ -21,6 +21,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add Zeys dependency
+    const zeys_dep = b.dependency("Zeys", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create executable
     const exe = b.addExecutable(.{
         .name = "tag",
@@ -31,6 +37,9 @@ pub fn build(b: *std.Build) void {
 
     // Add sokol module
     exe.root_module.addImport("sokol", sokol_dep.module("sokol"));
+    
+    // Add Zeys module
+    exe.root_module.addImport("zeys", zeys_dep.module("zeys"));
 
     b.installArtifact(exe);
 

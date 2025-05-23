@@ -40,6 +40,10 @@
             .url = "git+https://github.com/floooh/sokol-zig.git#7ef9d14262e55185a6ca99e2828d86d7d46f55bd",
             .hash = "sokol-0.1.0-pb1HK4mNLABa1i7wAE4b66xz7Nd_rRSCHfA0y0svWafR",
         },
+        .Zeys = .{
+            .url = "https://github.com/rullo24/Zeys/archive/refs/tags/v1.1.1.tar.gz",
+            .hash = "Zeys-1.1.0-AAAAACaGAAD0_nEimhVT5ikzSk3hSaWBIKy_a6HXA5Qy",
+        },
     },
     .paths = .{
         "build.zig",
