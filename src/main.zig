@@ -261,25 +261,30 @@ export fn frame() void {
     const char_height: f32 = 8.0;
     const grid_height = canvas_height / char_height;
     
-    // Render hint text at bottom left corner (normal size) - 3 lines with colors
+    // Render hint text at bottom left corner (normal size) - 4 lines with colors
     // Line 1: ENTER closes and processes
-    sdtx.pos(0.5, grid_height - 3.5);
+    sdtx.pos(0.5, grid_height - 4.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for ENTER
-    sdtx.puts("ENTER     "); // Padded to 10 chars to align with CTRL+ENTER
+    sdtx.puts("ENTER      "); // Padded to align with " CTRL +ENTER"
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" close and type");
     
-    // Line 2: CTRL+ENTER clipboard
-    sdtx.pos(0.5, grid_height - 2.5);
+    // Line 2: CTRL+ENTER clipboard 
+    sdtx.pos(0.5, grid_height - 3.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+ENTER
-    sdtx.puts("CTRL+ENTER"); // 10 chars - reference length
+    sdtx.puts(" CTRL+ENTER");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" clipboard");
     
-    // Line 3: ESC cancels
+    // Line 3: SHIFT (second part of clipboard action)
+    sdtx.pos(0.5, grid_height - 2.5);
+    sdtx.color3f(0.4, 0.8, 0.4); // Green for SHIFT
+    sdtx.puts("SHIFT      "); // Padded to match length
+    
+    // Line 4: ESC cancels
     sdtx.pos(0.5, grid_height - 1.5);
     sdtx.color3f(0.8, 0.4, 0.4); // Red for ESC
-    sdtx.puts("ESC       "); // Padded to 10 chars to align with CTRL+ENTER
+    sdtx.puts("ESC        "); // Padded to align
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" cancel");
     
@@ -472,7 +477,7 @@ pub fn main() void {
         .event_cb = event,
         .cleanup_cb = cleanup,
         .width = 450,
-        .height = 300,
+        .height = 180,
         .window_title = "Tag - Text Input UI",
         .logger = .{ .func = slog.func },
     });
@@ -849,6 +854,7 @@ fn executePostExitTypeAction() void {
     std.time.sleep(50_000_000);
     
     std.log.info("⌨️  Typing XML using Zeys...", .{});
+    std.log.info("{s}", .{xml_to_type});
     
     // Type the XML string with custom line break handling
     typeXmlWithShiftEnter(xml_to_type) catch |err| {
