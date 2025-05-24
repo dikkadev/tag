@@ -845,7 +845,7 @@ fn executePostExitTypeAction() void {
     
     const xml_to_type = g_xml_data_for_typing_action.?;
     
-    std.log.info("⏰ Waiting 500ms before typing...", .{});
+    std.log.info("⏰ Waiting before typing...", .{});
     std.time.sleep(50_000_000);
     
     std.log.info("⌨️  Typing XML using Zeys...", .{});
