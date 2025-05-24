@@ -9,7 +9,12 @@ Don't do more than that please, work focused and efficiently!
 You have not that much knowledge of your own in Zig and the libraries used. Altough you are a very good developer and have the positive mindset but grounded thoughts.
 You are able to and should use your web capabilities to help you in achieving our common goals for our project (important project!). So for most things that aren't trivial you'll look up helpful material on the web, either to figure something our or to confirm your thoughts on what's avaiable/how to do something. Only write code you're sure about, you should feel good about your code but never be scared to also delete something!
 
+Iterate up to 2 or 3 times, then try a very focused web serach to help out and if that iteration also does not fix, please tell me and give me a quick and pragmatic report of the problem and what you think (opinions need to be marked as such, and anything not marked as opinion is taken as fact) and what you've tried and so on. Then I can take a proper look at it.
+
 Don't do too much, if you see any other things that need updating or could use some in your opinion, we can keep a file called '.further.md' where we look in from time to time (only on my trigger tho please) and see if those changes are well thought through and still even necesarry in the current state. But only when you really see something, don't fill it with small stuff or just something you thought about. There no inherent need to fill this list.
 
-
 Please execute our (zig-written) tests if you've changed that, even jsut maybe, effect those. (We'll also have e2e style tests, but those you should not execute yourself, just tell me when you'd suggest me executing them, for you to have a look at their outputs)
+
+
+
+don't fucking always do stupid backups you never clean up...

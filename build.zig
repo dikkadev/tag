@@ -36,9 +36,13 @@ pub fn build(b: *std.Build) void {
         .win32_manifest = null,
     });
     
-    // Set Windows subsystem to GUI (prevents console window)
+    // Set Windows subsystem - use Console for debug builds to see logs
     if (target.result.os.tag == .windows) {
-        exe.subsystem = .Windows;
+        if (optimize == .Debug) {
+            exe.subsystem = .Console; // Show console for debug builds so we can see logs
+        } else {
+            exe.subsystem = .Windows; // GUI mode for release builds
+        }
     }
 
     // Add sokol module
@@ -46,6 +50,13 @@ pub fn build(b: *std.Build) void {
     
     // Add Zeys module
     exe.root_module.addImport("zeys", zeys_dep.module("zeys"));
+
+    // Add C wrapper for SUI library
+    exe.addCSourceFile(.{
+        .file = b.path("src/sui_wrapper.c"),
+        .flags = &.{"-std=c99"},
+    });
+    exe.linkLibC();
 
     b.installArtifact(exe);
 
