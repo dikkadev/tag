@@ -77,6 +77,6 @@ void sui_type_string(const char* text) {
         }
         
         // Small delay between characters
-        Sleep(5);
+        Sleep(10);
     }
 } 

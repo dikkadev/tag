@@ -585,6 +585,34 @@ test "shift enter line breaks" {
     try std.testing.expect(line_count == 3); // Three lines: opening tag, empty line, closing tag
 }
 
+test "unsupported characters replaced with tilde" {
+    const result = parseInputString("my.tag");
+    const expected = "<my~tag>\n\n</my~tag>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "multiple unsupported characters" {
+    const result = parseInputString("data,point.with@symbols");
+    const expected = "<data~point~with~symbols>\n\n</data~point~with~symbols>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "unsupported characters in attributes" {
+    const result = parseInputString("div\tclass.name\tmy.value");
+    const expected = "<div class~name=\"my.value\">\n\n</div>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "tilde characters preserved" {
+    const result = parseInputString("my~tag\talready~clean\tvalue");
+    const expected = "<my~tag already~clean=\"value\">\n\n</my~tag>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
 /// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
 const lib = @import("zig_lib");
 
@@ -671,7 +699,7 @@ fn parseInput() void {
     generateXMLDisplay();
 }
 
-// Clean tag/attribute names: spaces -> underscores, trim whitespace
+// Clean tag/attribute names: spaces -> underscores, unsupported chars -> tilde, trim whitespace
 fn cleanTagName(input: []const u8) []const u8 {
     var cleaned: [256]u8 = undefined;
     var cleaned_len: usize = 0;
@@ -682,13 +710,18 @@ fn cleanTagName(input: []const u8) []const u8 {
         if (cleaned_len >= 255) break;
         if (char == ' ') {
             cleaned[cleaned_len] = '_';
+            cleaned_len += 1;
         } else if ((char >= 'A' and char <= 'Z') or 
                    (char >= 'a' and char <= 'z') or 
                    (char >= '0' and char <= '9') or 
-                   char == '_' or char == '-') {
+                   char == '_' or char == '-' or char == '~') {
             cleaned[cleaned_len] = char;
+            cleaned_len += 1;
+        } else {
+            // Replace unsupported characters with tilde
+            cleaned[cleaned_len] = '~';
+            cleaned_len += 1;
         }
-        cleaned_len += 1;
     }
     
     return cleaned[0..cleaned_len];
@@ -971,20 +1004,45 @@ fn typeTextWithSUIShiftEnterLineBreaks(text: []const u8) !void {
         
         // Type the line content using SUI
         if (line.len > 0) {
-            std.log.info("⌨️  Typing line content using SUI: '{s}'", .{line});
-            
+            // Workaround for sui_type_string bug: double the first char of attribute values
+            var processed_line_array = std.ArrayList(u8).init(std.heap.page_allocator);
+            defer processed_line_array.deinit();
+
+            var k: usize = 0;
+            while (k < line.len) {
+                // Check for pattern: ="X where X is not " (start of attribute value)
+                if (line[k] == '=' and
+                    k + 2 < line.len and // Ensure there's line[k+1] and line[k+2]
+                    line[k+1] == '"' and
+                    line[k+2] != '"') // Make sure X is not a closing quote (i.e., value is not empty)
+                {
+                    try processed_line_array.appendSlice(line[k .. k+2]); // Append ="
+                    try processed_line_array.append(line[k+2]);          // Append X (the first char of value)
+                    try processed_line_array.append(line[k+2]);          // Append X again (to compensate for the bug)
+                    k += 3; // Consumed =", X
+                } else {
+                    try processed_line_array.append(line[k]);
+                    k += 1;
+                }
+            }
+            const processed_line_slice = try processed_line_array.toOwnedSlice();
+            defer std.heap.page_allocator.free(processed_line_slice);
+
+            std.log.info("🛠️  Original line for SUI: '{s}'", .{line});
+            std.log.info("🛠️  Processed (workaround) line for SUI: '{s}'", .{processed_line_slice});
+
             // Create null-terminated string for C function
-            var line_cstr = std.heap.page_allocator.allocSentinel(u8, line.len, 0) catch |err| {
-                std.log.err("❌ Failed to allocate memory for line: {}", .{err});
-                return err;
+            var line_cstr = std.heap.page_allocator.allocSentinel(u8, processed_line_slice.len, 0) catch |err| {
+                std.log.err("❌ Failed to allocate memory for processed line: {}", .{err});
+                return err; // Propagate error
             };
             defer std.heap.page_allocator.free(line_cstr);
-            
-            @memcpy(line_cstr[0..line.len], line);
+
+            @memcpy(line_cstr[0..processed_line_slice.len], processed_line_slice);
             sui_type_string(line_cstr.ptr);
-            
+
             std.log.info("✅ Successfully typed line content using SUI", .{});
-            
+
             // Small delay after typing content
             std.log.info("⏱️  Waiting 5ms after typing content...", .{});
             std.time.sleep(5_000_000); // 5ms delay
