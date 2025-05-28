@@ -1004,47 +1004,18 @@ fn typeTextWithSUIShiftEnterLineBreaks(text: []const u8) !void {
         
         // Type the line content using SUI
         if (line.len > 0) {
-            // Workaround for sui_type_string bug: double the first char of attribute values
-            var processed_line_array = std.ArrayList(u8).init(std.heap.page_allocator);
-            defer processed_line_array.deinit();
-
-            var k: usize = 0;
-            while (k < line.len) {
-                // Check for pattern: ="X where X is not " (start of attribute value)
-                if (line[k] == '=' and
-                    k + 2 < line.len and // Ensure there's line[k+1] and line[k+2]
-                    line[k+1] == '"' and
-                    line[k+2] != '"') // Make sure X is not a closing quote (i.e., value is not empty)
-                {
-                    try processed_line_array.appendSlice(line[k .. k+2]); // Append ="
-                    try processed_line_array.append(line[k+2]);          // Append X (the first char of value)
-                    try processed_line_array.append(line[k+2]);          // Append X again (to compensate for the bug)
-                    k += 3; // Consumed =", X
-                } else {
-                    try processed_line_array.append(line[k]);
-                    k += 1;
-                }
-            }
-            const processed_line_slice = try processed_line_array.toOwnedSlice();
-            defer std.heap.page_allocator.free(processed_line_slice);
-
-            std.log.info("🛠️  Original line for SUI: '{s}'", .{line});
-            std.log.info("🛠️  Processed (workaround) line for SUI: '{s}'", .{processed_line_slice});
-
-            // Create null-terminated string for C function
-            var line_cstr = std.heap.page_allocator.allocSentinel(u8, processed_line_slice.len, 0) catch |err| {
-                std.log.err("❌ Failed to allocate memory for processed line: {}", .{err});
-                return err; // Propagate error
+            // Create null-terminated string for C function and type the line using SUI
+            std.log.info("⌨️ Typing line {}: '{s}'", .{ line_number, line });
+            var line_cstr = std.heap.page_allocator.allocSentinel(u8, line.len, 0) catch |err| {
+                std.log.err("❌ Failed to allocate memory for line: {}", .{err});
+                return err;
             };
             defer std.heap.page_allocator.free(line_cstr);
 
-            @memcpy(line_cstr[0..processed_line_slice.len], processed_line_slice);
+            @memcpy(line_cstr[0..line.len], line);
             sui_type_string(line_cstr.ptr);
 
             std.log.info("✅ Successfully typed line content using SUI", .{});
-
-            // Small delay after typing content
-            std.log.info("⏱️  Waiting 5ms after typing content...", .{});
             std.time.sleep(5_000_000); // 5ms delay
         } else {
             std.log.info("⭕ Skipping empty line", .{});
