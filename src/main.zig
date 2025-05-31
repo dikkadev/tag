@@ -72,6 +72,20 @@ var hint_text_scale: f32 = 1.15;   // Higher value = smaller text
 var g_initiate_type_action: bool = false;
 var g_xml_data_for_typing_action: ?[]u8 = null;
 
+// ────────────────────────────────────────────────────────────────────────────────
+// Undo/Redo functionality
+// ────────────────────────────────────────────────────────────────────────────────
+const MAX_BUFFER = 4096; // Size of input_buffer
+
+const StateSnapshot = struct {
+    buffer: [MAX_BUFFER]u8, // a full copy of the input buffer
+    len: usize,             // how many of those bytes are "in use"
+};
+
+// Undo / redo stacks:
+var undo_stack: std.ArrayList(StateSnapshot) = undefined;
+var redo_stack: std.ArrayList(StateSnapshot) = undefined;
+
 // Windows clipboard API declarations
 const windows = std.os.windows;
 extern "user32" fn OpenClipboard(hWndNewOwner: ?windows.HWND) c_int;
@@ -242,10 +256,28 @@ export fn init() void {
     @memset(&input_buffer, 0);
     input_len = 0;
     
+    // ────────────────────────────────────────────────────────────────────────────
+    // Initialize undo/redo stacks using the page_allocator
+    // ────────────────────────────────────────────────────────────────────────────
+    undo_stack = std.ArrayList(StateSnapshot).init(std.heap.page_allocator);
+    redo_stack = std.ArrayList(StateSnapshot).init(std.heap.page_allocator);
+
+    // Before the user types anything, capture the "empty" state for undo.
+    const emptySnapshot = StateSnapshot{
+        .buffer = undefined,
+        .len = input_len, // 0 at startup
+    };
+    // Initialize buffer to zeros (it's already zeroed by memset above)
+    var initial_snap = emptySnapshot;
+    @memcpy(initial_snap.buffer[0..initial_snap.len], input_buffer[0..initial_snap.len]);
+    _ = undo_stack.append(initial_snap) catch {
+        std.log.err("Failed to initialize undo stack", .{});
+    };
+    
     // Initialize the XML output with placeholder
     parseInput();
     
-    std.log.info("Tag UI initialized with XML generation", .{});
+    std.log.info("Tag UI initialized with XML generation and undo/redo", .{});
 }
 
 export fn frame() void {
@@ -289,27 +321,43 @@ export fn frame() void {
     const char_height: f32 = 8.0;
     const grid_height = canvas_height / char_height;
     
-    // Render hint text at bottom left corner (normal size) - 4 lines with colors
+    // Render hint text at bottom left corner (normal size) - 6 lines with colors
     // Line 1: ENTER closes and processes
-    sdtx.pos(0.5, grid_height - 4.5);
+    sdtx.pos(0.5, grid_height - 6.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for ENTER
     sdtx.puts("      ENTER"); // Padded to align with " CTRL +ENTER"
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" type");
     
     // Line 2: CTRL+ENTER clipboard 
-    sdtx.pos(0.5, grid_height - 3.5);
+    sdtx.pos(0.5, grid_height - 5.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+ENTER
     sdtx.puts("CTRL +ENTER");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" clipboard");
     
-    // Line 3: SHIFT (second part of clipboard action)
-    sdtx.pos(0.5, grid_height - 2.5);
-    sdtx.color3f(0.4, 0.8, 0.4); // Green for SHIFT
-    sdtx.puts("SHIFT      "); // Padded to match length
+    // Line 3: CTRL+V paste
+    sdtx.pos(0.5, grid_height - 4.5);
+    sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+V
+    sdtx.puts("CTRL +V    ");
+    sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
+    sdtx.puts(" paste");
     
-    // Line 4: ESC cancels
+    // Line 4: CTRL+Z undo
+    sdtx.pos(0.5, grid_height - 3.5);
+    sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+Z
+    sdtx.puts("CTRL +Z    ");
+    sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
+    sdtx.puts(" undo");
+    
+    // Line 5: CTRL+Y redo
+    sdtx.pos(0.5, grid_height - 2.5);
+    sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+Y
+    sdtx.puts("CTRL +Y    ");
+    sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
+    sdtx.puts(" redo");
+    
+    // Line 6: ESC cancels
     sdtx.pos(0.5, grid_height - 1.5);
     sdtx.color3f(0.8, 0.4, 0.4); // Red for ESC
     sdtx.puts("ESC        "); // Padded to align
@@ -342,6 +390,66 @@ fn processTextAndClose() void {
     sapp.quit();
 }
 
+/// Create a full copy of input_buffer + input_len.
+fn snapshotCurrentState() StateSnapshot {
+    var s: StateSnapshot = StateSnapshot{
+        .buffer = undefined,
+        .len = input_len,
+    };
+    @memcpy(s.buffer[0..s.len], input_buffer[0..s.len]);
+    return s;
+}
+
+/// Overwrite input_buffer + input_len from a snapshot, then re-parse.
+fn restoreState(s: StateSnapshot) void {
+    input_len = s.len;
+    @memcpy(input_buffer[0..s.len], s.buffer[0..s.len]);
+    parseInput();
+}
+
+/// Push the current state onto the undo stack.
+fn pushUndoSnapshot() void {
+    const snap = snapshotCurrentState();
+    _ = undo_stack.append(snap) catch {
+        std.log.err("🚫 undo_stack.append failed", .{});
+        return;
+    };
+}
+
+/// Perform "undo" (Ctrl+Z). Restore the last snapshot from undo_stack, push current onto redo_stack.
+fn undoAction() void {
+    if (undo_stack.items.len == 0) {
+        return; // nothing to undo
+    }
+    // Pop the most recent snapshot
+    const lastSnap = undo_stack.pop() orelse return;
+
+    // Before we restore "lastSnap," push *current* state onto redo_stack
+    const currentSnap = snapshotCurrentState();
+    _ = redo_stack.append(currentSnap) catch {
+        std.log.err("🚫 redo_stack.append failed", .{});
+    };
+
+    // Now restore
+    restoreState(lastSnap);
+}
+
+/// Perform "redo" (Ctrl+Y). Opposite of undo.
+fn redoAction() void {
+    if (redo_stack.items.len == 0) {
+        return; // nothing to redo
+    }
+    const nextSnap = redo_stack.pop() orelse return;
+
+    // Push current onto undo_stack
+    const currentSnap = snapshotCurrentState();
+    _ = undo_stack.append(currentSnap) catch {
+        std.log.err("🚫 undo_stack.append failed", .{});
+    };
+
+    restoreState(nextSnap);
+}
+
 export fn event(e: [*c]const sapp.Event) void {
     const event_ptr = @as(*const sapp.Event, @ptrCast(e));
     
@@ -349,6 +457,62 @@ export fn event(e: [*c]const sapp.Event) void {
         .KEY_DOWN => {
             const key = event_ptr.key_code;
             const modifiers = event_ptr.modifiers;
+            
+            // Handle Ctrl+Z (undo)
+            if (key == .Z and (modifiers & 0x02) != 0) {
+                undoAction();
+                std.log.info("↶ Undo action performed", .{});
+                return;
+            }
+            
+            // Handle Ctrl+Y (redo)
+            if (key == .Y and (modifiers & 0x02) != 0) {
+                redoAction();
+                std.log.info("↷ Redo action performed", .{});
+                return;
+            }
+            
+            // Handle Ctrl+V (paste) - only for values (after first tab)
+            if (key == .V and (modifiers & 0x02) != 0) {
+                if (getClipboardText()) |clip_data| {
+                    defer std.heap.page_allocator.free(clip_data);
+                    
+                    // Check there's at least one '\t' already (we're past the tag name)
+                    var seen_tab: bool = false;
+                    for (input_buffer[0..input_len]) |c| {
+                        if (c == '\t') {
+                            seen_tab = true;
+                            break;
+                        }
+                    }
+                    
+                                         if (seen_tab) {
+                         // Snapshot current state for undo
+                         pushUndoSnapshot();
+                         // Clear redo history for big edits like paste
+                         redo_stack.clearRetainingCapacity();
+                         
+                         // Copy as many bytes as will fit into input_buffer
+                         for (clip_data) |c| {
+                             if (input_len < input_buffer.len - 1) {
+                                 input_buffer[input_len] = c;
+                                 input_len += 1;
+                             } else {
+                                 break;
+                             }
+                         }
+                         
+                         // Re-parse so xml_output + xml_display update
+                         parseInput();
+                         std.log.info("📋 Pasted {} characters from clipboard", .{clip_data.len});
+                     } else {
+                        std.log.warn("🚫 Can only paste into a value (after first tab)", .{});
+                    }
+                } else {
+                    std.log.warn("📋 Clipboard empty or unavailable", .{});
+                }
+                return;
+            }
             
             if (key == .ESCAPE) {
                 std.log.info("🚪 ESC pressed - quitting application", .{});
@@ -397,7 +561,11 @@ export fn event(e: [*c]const sapp.Event) void {
             }
             
             if (key == .TAB) {
-                // Add tab support
+                // Snapshot before inserting the tab (completes a "thing")
+                pushUndoSnapshot();
+                // Clear redo history for big edits like tab completion
+                redo_stack.clearRetainingCapacity();
+                
                 if (input_len < input_buffer.len - 1) {
                     input_buffer[input_len] = '\t';
                     input_len += 1;
@@ -408,7 +576,9 @@ export fn event(e: [*c]const sapp.Event) void {
             }
             
             if (key == .BACKSPACE) {
+                // If buffer is non-empty, snapshot so we can undo this deletion
                 if (input_len > 0) {
+                    pushUndoSnapshot();
                     input_len -= 1;
                     input_buffer[input_len] = 0;
                     parseInput(); // Update XML when input changes
@@ -500,6 +670,9 @@ pub fn main() void {
     std.log.info("   ENTER = close and process text", .{});
     std.log.info("   TAB = add tab character", .{});
     std.log.info("   CTRL+ENTER or SHIFT+ENTER = copy to clipboard and quit", .{});
+    std.log.info("   CTRL+V = paste clipboard content (only after first tab)", .{});
+    std.log.info("   CTRL+Z = undo last action", .{});
+    std.log.info("   CTRL+Y = redo last undone action", .{});
     std.log.info("   Type to add characters", .{});
     std.log.info("", .{});
     
@@ -611,6 +784,70 @@ test "tilde characters preserved" {
     const expected = "<my~tag already~clean=\"value\">\n\n</my~tag>";
     const result_str = std.mem.sliceTo(&result, 0);
     try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "undo/redo state snapshot functionality" {
+    // Test that we can create and restore snapshots
+    const original_input_len = input_len;
+    const original_input_buffer = input_buffer;
+    
+    // Set up test state
+    input_len = 5;
+    @memcpy(input_buffer[0..5], "hello");
+    
+    // Create snapshot
+    const snapshot = snapshotCurrentState();
+    try std.testing.expect(snapshot.len == 5);
+    try std.testing.expectEqualStrings(snapshot.buffer[0..5], "hello");
+    
+    // Modify state
+    input_len = 3;
+    @memcpy(input_buffer[0..3], "bye");
+    
+    // Restore snapshot
+    restoreState(snapshot);
+    try std.testing.expect(input_len == 5);
+    try std.testing.expectEqualStrings(input_buffer[0..5], "hello");
+    
+    // Restore original state
+    input_len = original_input_len;
+    input_buffer = original_input_buffer;
+}
+
+test "undo/redo stack operations" {
+    // Initialize stacks for testing
+    var test_undo_stack = std.ArrayList(StateSnapshot).init(std.testing.allocator);
+    defer test_undo_stack.deinit();
+    var test_redo_stack = std.ArrayList(StateSnapshot).init(std.testing.allocator);
+    defer test_redo_stack.deinit();
+    
+    // Test that we can push and pop snapshots
+    const snapshot1 = StateSnapshot{
+        .buffer = undefined,
+        .len = 3,
+    };
+    var snap1 = snapshot1;
+    @memcpy(snap1.buffer[0..3], "abc");
+    
+    const snapshot2 = StateSnapshot{
+        .buffer = undefined,
+        .len = 5,
+    };
+    var snap2 = snapshot2;
+    @memcpy(snap2.buffer[0..5], "hello");
+    
+    // Push snapshots
+    try test_undo_stack.append(snap1);
+    try test_undo_stack.append(snap2);
+    
+    // Pop and verify
+    const popped = test_undo_stack.pop() orelse unreachable;
+    try std.testing.expect(popped.len == 5);
+    try std.testing.expectEqualStrings(popped.buffer[0..5], "hello");
+    
+    const popped2 = test_undo_stack.pop() orelse unreachable;
+    try std.testing.expect(popped2.len == 3);
+    try std.testing.expectEqualStrings(popped2.buffer[0..3], "abc");
 }
 
 /// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
@@ -877,6 +1114,42 @@ fn parseInputString(input: []const u8) [8192]u8 {
     xml_output = saved_xml_output;
     
     return result;
+}
+
+fn getClipboardText() ?[]u8 {
+    if (OpenClipboard(null) == 0) {
+        std.log.err("Failed to open clipboard for reading", .{});
+        return null;
+    }
+    defer _ = CloseClipboard();
+    
+    const hData = GetClipboardData(CF_TEXT) orelse {
+        std.log.warn("No text data in clipboard", .{});
+        return null;
+    };
+    
+    const pData = GlobalLock(hData) orelse {
+        std.log.err("Failed to lock clipboard data", .{});
+        return null;
+    };
+    defer _ = GlobalUnlock(hData);
+    
+    // Cast to a null-terminated string and find the length
+    const clipboard_cstr: [*:0]const u8 = @ptrCast(pData);
+    const clipboard_len = std.mem.len(clipboard_cstr);
+    
+    if (clipboard_len == 0) {
+        return null;
+    }
+    
+    // Allocate memory for the clipboard text
+    const clipboard_text = std.heap.page_allocator.alloc(u8, clipboard_len) catch {
+        std.log.err("Failed to allocate memory for clipboard text", .{});
+        return null;
+    };
+    
+    @memcpy(clipboard_text, clipboard_cstr[0..clipboard_len]);
+    return clipboard_text;
 }
 
 fn copyToClipboard(text: []const u8) bool {
