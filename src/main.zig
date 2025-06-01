@@ -850,6 +850,53 @@ test "undo/redo stack operations" {
     try std.testing.expectEqualStrings(popped2.buffer[0..3], "abc");
 }
 
+test "quote escaping in attribute values" {
+    const result = parseInputString("div\tclass\thello \"world\" & <test>");
+    const expected = "<div class=\"hello &quot;world&quot; &amp; &lt;test&gt;\">\n\n</div>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "mixed quotes and special characters" {
+    const result = parseInputString("input\tvalue\t\"quoted\" & 'single' <tag>");
+    const expected = "<input value=\"&quot;quoted&quot; &amp; 'single' &lt;tag&gt;\">\n\n</input>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "ampersand escaping" {
+    const result = parseInputString("tag\tdata\tR&D department");
+    const expected = "<tag data=\"R&amp;D department\">\n\n</tag>";
+    const result_str = std.mem.sliceTo(&result, 0);
+    try std.testing.expectEqualStrings(expected, result_str);
+}
+
+test "text wrapping functionality" {
+    // Test the wrapping function with a long string that should wrap
+    xml_display_len = 0;
+    const long_text = "This is a very long text that should definitely wrap at the specified character limit to test our wrapping functionality properly";
+    appendToXMLDisplayWithWrapping(long_text);
+    
+    // Verify that newlines were inserted
+    const result = xml_display[0..xml_display_len];
+    const has_newlines = std.mem.indexOf(u8, result, "\n") != null;
+    try std.testing.expect(has_newlines);
+    
+    // Verify the line length is approximately correct (should be around 42 chars per line)
+    var lines = std.mem.splitScalar(u8, result, '\n');
+    var line_count: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len > 0) {
+            try std.testing.expect(line.len <= 42); // Should not exceed MAX_CHARS_PER_LINE
+            line_count += 1;
+        }
+    }
+    try std.testing.expect(line_count >= 2); // Should have wrapped into at least 2 lines
+    
+    // Reset for next test
+    xml_display_len = 0;
+}
+
 /// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
 const lib = @import("zig_lib");
 
@@ -997,7 +1044,7 @@ fn generateXML() void {
                 // This is a key-value pair, next slot has the value
                 if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
                     appendToXML("=\"");
-                    appendToXML(parsed_data.attributes[i + 1].slice());
+                    appendEscapedToXML(parsed_data.attributes[i + 1].slice());
                     appendToXML("\"");
                     i += 2; // Skip both name and value
                 } else {
@@ -1027,6 +1074,33 @@ fn appendToXML(text: []const u8) void {
     }
 }
 
+fn appendEscapedToXML(text: []const u8) void {
+    for (text) |char| {
+        if (xml_len >= xml_output.len - 6) break; // Reserve space for longest escape sequence
+        
+        switch (char) {
+            '"' => {
+                appendToXML("&quot;");
+            },
+            '&' => {
+                appendToXML("&amp;");
+            },
+            '<' => {
+                appendToXML("&lt;");
+            },
+            '>' => {
+                appendToXML("&gt;");
+            },
+            else => {
+                if (xml_len < xml_output.len) {
+                    xml_output[xml_len] = char;
+                    xml_len += 1;
+                }
+            },
+        }
+    }
+}
+
 fn appendToXMLDisplay(text: []const u8) void {
     const remaining = xml_display.len - xml_display_len;
     const to_copy = @min(text.len, remaining);
@@ -1036,7 +1110,106 @@ fn appendToXMLDisplay(text: []const u8) void {
     }
 }
 
-// Generate display version of XML with enhanced visual spacing for empty line
+fn appendEscapedToXMLDisplay(text: []const u8) void {
+    for (text) |char| {
+        if (xml_display_len >= xml_display.len - 6) break; // Reserve space for longest escape sequence
+        
+        switch (char) {
+            '"' => {
+                appendToXMLDisplay("&quot;");
+            },
+            '&' => {
+                appendToXMLDisplay("&amp;");
+            },
+            '<' => {
+                appendToXMLDisplay("&lt;");
+            },
+            '>' => {
+                appendToXMLDisplay("&gt;");
+            },
+            else => {
+                if (xml_display_len < xml_display.len) {
+                    xml_display[xml_display_len] = char;
+                    xml_display_len += 1;
+                }
+            },
+        }
+    }
+}
+
+// Text wrapping constants - calculated for fixed window size 450x180
+// Window width: 450px, text scale: 1.3, effective width: ~346px
+// Character width: ~8px, so ~43 chars fit, using 42 for good balance
+const MAX_CHARS_PER_LINE: usize = 42; // Good balance of space usage and safety
+const MAX_LINES: usize = 8; // Maximum lines that fit in the display area
+
+fn appendToXMLDisplayWithWrapping(text: []const u8) void {
+    var current_line_length: usize = 0;
+    
+    // Count current line length by looking backwards to last newline
+    if (xml_display_len > 0) {
+        var i: usize = xml_display_len;
+        while (i > 0) {
+            i -= 1;
+            if (xml_display[i] == '\n') {
+                current_line_length = xml_display_len - i - 1;
+                break;
+            }
+        } else {
+            current_line_length = xml_display_len;
+        }
+    }
+    
+    for (text) |char| {
+        if (xml_display_len >= xml_display.len - 1) break;
+        
+        // Check if we need to wrap
+        if (current_line_length >= MAX_CHARS_PER_LINE and char != '\n') {
+            // Add a line break
+            xml_display[xml_display_len] = '\n';
+            xml_display_len += 1;
+            current_line_length = 0;
+            
+            if (xml_display_len >= xml_display.len - 1) break;
+        }
+        
+        xml_display[xml_display_len] = char;
+        xml_display_len += 1;
+        
+        if (char == '\n') {
+            current_line_length = 0;
+        } else {
+            current_line_length += 1;
+        }
+    }
+}
+
+fn appendEscapedToXMLDisplayWithWrapping(text: []const u8) void {
+    for (text) |char| {
+        if (xml_display_len >= xml_display.len - 6) break; // Reserve space for longest escape sequence
+        
+        switch (char) {
+            '"' => {
+                appendToXMLDisplayWithWrapping("&quot;");
+            },
+            '&' => {
+                appendToXMLDisplayWithWrapping("&amp;");
+            },
+            '<' => {
+                appendToXMLDisplayWithWrapping("&lt;");
+            },
+            '>' => {
+                appendToXMLDisplayWithWrapping("&gt;");
+            },
+            else => {
+                const single_char = [1]u8{char};
+                appendToXMLDisplayWithWrapping(&single_char);
+            },
+        }
+    }
+}
+
+// Generate display version of XML with enhanced visual spacing and text wrapping
 fn generateXMLDisplay() void {
     xml_display_len = 0;
     
@@ -1051,22 +1224,22 @@ fn generateXMLDisplay() void {
     const tag_name = parsed_data.tag_name.slice();
     
     // Build opening tag with attributes
-    appendToXMLDisplay("<");
-    appendToXMLDisplay(tag_name);
+    appendToXMLDisplayWithWrapping("<");
+    appendToXMLDisplayWithWrapping(tag_name);
     
     // Add attributes using boolean flags (same logic as original)
     var i: usize = 0;
     while (i < parsed_data.attr_count) {
         if (!parsed_data.attributes[i].isEmpty()) {
-            appendToXMLDisplay(" ");
-            appendToXMLDisplay(parsed_data.attributes[i].slice()); // attribute name
+            appendToXMLDisplayWithWrapping(" ");
+            appendToXMLDisplayWithWrapping(parsed_data.attributes[i].slice()); // attribute name
             
             if (!parsed_data.is_boolean[i]) {
                 // This is a key-value pair, next slot has the value
                 if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
-                    appendToXMLDisplay("=\"");
-                    appendToXMLDisplay(parsed_data.attributes[i + 1].slice());
-                    appendToXMLDisplay("\"");
+                    appendToXMLDisplayWithWrapping("=\"");
+                    appendEscapedToXMLDisplayWithWrapping(parsed_data.attributes[i + 1].slice());
+                    appendToXMLDisplayWithWrapping("\"");
                     i += 2; // Skip both name and value
                 } else {
                     // Something went wrong, treat as boolean
@@ -1082,9 +1255,9 @@ fn generateXMLDisplay() void {
     }
     
     // Enhanced visual spacing for display: add extra newlines to make empty line more visible
-    appendToXMLDisplay(">\n\n\n</");  // Extra newline for better visual separation
-    appendToXMLDisplay(tag_name);
-    appendToXMLDisplay(">");
+    appendToXMLDisplayWithWrapping(">\n\n\n</");  // Extra newline for better visual separation
+    appendToXMLDisplayWithWrapping(tag_name);
+    appendToXMLDisplayWithWrapping(">");
 }
 
 // Test function to parse input string and return XML
