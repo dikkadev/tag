@@ -1,7 +1,3 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
-
 const std = @import("std");
 const sokol = @import("sokol");
 const sapp = sokol.app;
@@ -9,7 +5,7 @@ const sgfx = sokol.gfx;
 const slog = sokol.log;
 const sglue = sokol.glue;
 const sdtx = sokol.debugtext;
-const zeys = @import("zeys");
+const win_api = @import("windows_api.zig");
 
 // Parsed token data
 const Token = struct {
@@ -56,7 +52,7 @@ const ParsedInput = struct {
 // App state
 var input_buffer: [4096]u8 = undefined;
 var input_len: usize = 0;
-var should_close_and_process = false;
+
 var large_text_context: sdtx.Context = undefined;
 var parsed_data: ParsedInput = ParsedInput{};
 var xml_output: [8192]u8 = undefined;
@@ -68,14 +64,18 @@ var xml_display_len: usize = 0;
 var input_text_scale: f32 = 1.3;  // Higher value = smaller text
 var hint_text_scale: f32 = 1.15;   // Higher value = smaller text
 
+// Canvas size constants for large text context
+const LARGE_TEXT_CANVAS_WIDTH = 320;   // Smaller canvas = larger text (about 2x bigger)
+const LARGE_TEXT_CANVAS_HEIGHT = 240;
+
 // Variables for post-exit type action
-var g_initiate_type_action: bool = false;
-var g_xml_data_for_typing_action: ?[]u8 = null;
+var initiate_type_action: bool = false;
+var xml_data_for_typing_action: ?[]u8 = null;
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Undo/Redo functionality
 // ────────────────────────────────────────────────────────────────────────────────
-const MAX_BUFFER = 4096; // Size of input_buffer
+const MAX_BUFFER = 4096;
 
 const StateSnapshot = struct {
     buffer: [MAX_BUFFER]u8, // a full copy of the input buffer
@@ -86,77 +86,9 @@ const StateSnapshot = struct {
 var undo_stack: std.ArrayList(StateSnapshot) = undefined;
 var redo_stack: std.ArrayList(StateSnapshot) = undefined;
 
-// Windows clipboard API declarations
-const windows = std.os.windows;
-extern "user32" fn OpenClipboard(hWndNewOwner: ?windows.HWND) c_int;
-extern "user32" fn CloseClipboard() c_int;
-extern "user32" fn EmptyClipboard() c_int;
-extern "user32" fn SetClipboardData(uFormat: u32, hMem: ?windows.HANDLE) ?windows.HANDLE;
-extern "user32" fn GetClipboardData(uFormat: u32) ?windows.HANDLE;
-extern "kernel32" fn GlobalAlloc(uFlags: u32, dwBytes: usize) ?windows.HANDLE;
-extern "kernel32" fn GlobalLock(hMem: ?windows.HANDLE) ?*anyopaque;
-extern "kernel32" fn GlobalUnlock(hMem: ?windows.HANDLE) c_int;
 
-const CF_TEXT: u32 = 1;
-const GMEM_MOVEABLE: u32 = 0x0002;
 
-// Windows multi-monitor API declarations
-extern "user32" fn GetCursorPos(lpPoint: *POINT) windows.BOOL;
-extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) ?windows.HANDLE;
-extern "user32" fn GetMonitorInfoW(hMonitor: windows.HANDLE, lpmi: *MONITORINFO) windows.BOOL;
-extern "user32" fn FindWindowW(lpClassName: ?[*:0]const u16, lpWindowName: ?[*:0]const u16) ?windows.HWND;
-extern "user32" fn SetWindowPos(hWnd: windows.HWND, hWndInsertAfter: ?windows.HWND, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) windows.BOOL;
 
-// Windows API structures for window positioning
-const POINT = extern struct {
-    x: i32,
-    y: i32,
-};
-
-const RECT = extern struct {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-};
-
-const MONITORINFO = extern struct {
-    cbSize: u32,
-    rcMonitor: RECT,
-    rcWork: RECT,
-    dwFlags: u32,
-};
-
-const MONITOR_DEFAULTTONEAREST: u32 = 0x00000002;
-const SWP_NOSIZE: u32 = 0x0001;
-const SWP_NOZORDER: u32 = 0x0004;
-const SWP_NOACTIVATE: u32 = 0x0010;
-
-// Windows API for key combinations
-const KEYEVENTF_KEYUP: u32 = 0x0002;
-const INPUT_KEYBOARD: u32 = 1;
-const VK_SHIFT: u16 = 0x10;
-const VK_RETURN: u16 = 0x0D;
-
-const KEYBDINPUT = extern struct {
-    wVk: u16,
-    wScan: u16,
-    dwFlags: u32,
-    time: u32,
-    dwExtraInfo: usize,
-};
-
-const INPUT_UNION = extern union {
-    ki: KEYBDINPUT,
-    padding: [24]u8,
-};
-
-const INPUT = extern struct {
-    type: u32,
-    input: INPUT_UNION,
-};
-
-extern "user32" fn SendInput(cInputs: u32, pInputs: [*]const INPUT, cbSize: c_int) u32;
 
 // Track desired window position based on mouse location at startup
 var desired_window_x: i32 = 0;
@@ -165,71 +97,26 @@ var window_position_calculated = false;
 var window_positioned = false;
 
 fn calculateDesiredWindowPosition() void {
-    if (@import("builtin").target.os.tag != .windows or window_position_calculated) {
-        return; // Only works on Windows, and only calculate once
+    if (window_position_calculated) {
+        return; // Only calculate once
     }
     
-    // Get current mouse cursor position
-    var cursor_pos: POINT = undefined;
-    if (GetCursorPos(&cursor_pos) == 0) {
-        std.log.warn("Failed to get cursor position", .{});
-        return;
+    const pos = win_api.calculateDesiredWindowPosition();
+    if (pos.calculated) {
+        desired_window_x = pos.x;
+        desired_window_y = pos.y;
+        window_position_calculated = true;
     }
-    
-    // Find the monitor containing the cursor
-    const hMonitor = MonitorFromPoint(cursor_pos, MONITOR_DEFAULTTONEAREST) orelse {
-        std.log.warn("Failed to get monitor from cursor position", .{});
-        return;
-    };
-    
-    // Get monitor information
-    var monitor_info: MONITORINFO = undefined;
-    monitor_info.cbSize = @sizeOf(MONITORINFO);
-    if (GetMonitorInfoW(hMonitor, &monitor_info) == 0) {
-        std.log.warn("Failed to get monitor information", .{});
-        return;
-    }
-    
-    // Calculate position for top-left area of the target monitor (not centered)
-    const margin_x: i32 = 50;  // Some margin from the edge
-    const margin_y: i32 = 50;  // Some margin from the top
-    
-    desired_window_x = monitor_info.rcWork.left + margin_x;
-    desired_window_y = monitor_info.rcWork.top + margin_y;
-    
-    window_position_calculated = true;
-    std.log.info("🖥️  Calculated window position for monitor containing mouse cursor: ({}, {})", .{ desired_window_x, desired_window_y });
 }
 
 fn positionWindowOnMouseMonitor() void {
-    if (@import("builtin").target.os.tag != .windows or window_positioned) {
-        return; // Only works on Windows, and only do it once
+    if (window_positioned or !window_position_calculated) {
+        return; // Only do it once and only if position was calculated
     }
     
-    if (!window_position_calculated) {
-        return; // Position not calculated yet
+    if (win_api.positionWindow("Tag - Text Input UI", desired_window_x, desired_window_y)) {
+        window_positioned = true;
     }
-    
-    // Find our window using the window title
-    const window_title_utf16 = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, "Tag - Text Input UI") catch {
-        std.log.warn("Failed to convert window title to UTF-16", .{});
-        return;
-    };
-    defer std.heap.page_allocator.free(window_title_utf16);
-    
-    const hwnd = FindWindowW(null, window_title_utf16.ptr) orelse {
-        // Window might not be ready yet, try again next frame
-        return;
-    };
-    
-    // Position the window at the calculated location
-    if (SetWindowPos(hwnd, null, desired_window_x, desired_window_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) == 0) {
-        std.log.warn("Failed to position window", .{});
-        return;
-    }
-    
-    window_positioned = true;
-    std.log.info("🖥️  Positioned window at ({}, {}) on monitor containing mouse cursor", .{ desired_window_x, desired_window_y });
 }
 
 export fn init() void {
@@ -249,8 +136,8 @@ export fn init() void {
     
     // Create a larger text context for input text
     large_text_context = sdtx.makeContext(.{
-        .canvas_width = 320,   // Smaller canvas = larger text (about 2x bigger)
-        .canvas_height = 240,
+        .canvas_width = LARGE_TEXT_CANVAS_WIDTH,
+        .canvas_height = LARGE_TEXT_CANVAS_HEIGHT,
     });
     
     @memset(&input_buffer, 0);
@@ -370,25 +257,9 @@ export fn frame() void {
     
     sgfx.endPass();
     sgfx.commit();
-    
-    // Check if we should close and process
-    if (should_close_and_process) {
-        // Execute the code that should run before app exit
-        processTextAndClose();
-    }
 }
 
-fn processTextAndClose() void {
-    std.log.info("🔄 Processing typed text before closing...", .{});
-    std.log.info("📝 Final text content: '{s}'", .{input_buffer[0..input_len]});
-    std.log.info("🏷️  Final generated XML: '{s}'", .{xml_output[0..xml_len]});
-    
-    // Here you can add any processing logic you need
-    // For example: save to file, send to clipboard, etc.
-    
-    std.log.info("✅ Processing complete. Closing application.", .{});
-    sapp.quit();
-}
+
 
 /// Create a full copy of input_buffer + input_len.
 fn snapshotCurrentState() StateSnapshot {
@@ -411,7 +282,7 @@ fn restoreState(s: StateSnapshot) void {
 fn pushUndoSnapshot() void {
     const snap = snapshotCurrentState();
     _ = undo_stack.append(snap) catch {
-        std.log.err("🚫 undo_stack.append failed", .{});
+        std.log.err("undo_stack.append failed", .{});
         return;
     };
 }
@@ -427,7 +298,7 @@ fn undoAction() void {
     // Before we restore "lastSnap," push *current* state onto redo_stack
     const currentSnap = snapshotCurrentState();
     _ = redo_stack.append(currentSnap) catch {
-        std.log.err("🚫 redo_stack.append failed", .{});
+        std.log.err("redo_stack.append failed", .{});
     };
 
     // Now restore
@@ -444,7 +315,7 @@ fn redoAction() void {
     // Push current onto undo_stack
     const currentSnap = snapshotCurrentState();
     _ = undo_stack.append(currentSnap) catch {
-        std.log.err("🚫 undo_stack.append failed", .{});
+        std.log.err("undo_stack.append failed", .{});
     };
 
     restoreState(nextSnap);
@@ -461,20 +332,20 @@ export fn event(e: [*c]const sapp.Event) void {
             // Handle Ctrl+Z (undo)
             if (key == .Z and (modifiers & 0x02) != 0) {
                 undoAction();
-                std.log.info("↶ Undo action performed", .{});
+                std.log.info("Undo action performed", .{});
                 return;
             }
             
             // Handle Ctrl+Y (redo)
             if (key == .Y and (modifiers & 0x02) != 0) {
                 redoAction();
-                std.log.info("↷ Redo action performed", .{});
+                std.log.info("Redo action performed", .{});
                 return;
             }
             
             // Handle Ctrl+V (paste) - only for values (after first tab)
             if (key == .V and (modifiers & 0x02) != 0) {
-                if (getClipboardText()) |clip_data| {
+                if (win_api.getClipboardText()) |clip_data| {
                     defer std.heap.page_allocator.free(clip_data);
                     
                     // Check there's at least one '\t' already (we're past the tag name)
@@ -486,36 +357,36 @@ export fn event(e: [*c]const sapp.Event) void {
                         }
                     }
                     
-                                         if (seen_tab) {
-                         // Snapshot current state for undo
-                         pushUndoSnapshot();
-                         // Clear redo history for big edits like paste
-                         redo_stack.clearRetainingCapacity();
-                         
-                         // Copy as many bytes as will fit into input_buffer
-                         for (clip_data) |c| {
-                             if (input_len < input_buffer.len - 1) {
-                                 input_buffer[input_len] = c;
-                                 input_len += 1;
-                             } else {
-                                 break;
-                             }
-                         }
-                         
-                         // Re-parse so xml_output + xml_display update
-                         parseInput();
-                         std.log.info("📋 Pasted {} characters from clipboard", .{clip_data.len});
-                     } else {
-                        std.log.warn("🚫 Can only paste into a value (after first tab)", .{});
+                                        if (seen_tab) {
+                        // Snapshot current state for undo
+                        pushUndoSnapshot();
+                        // Clear redo history for big edits like paste
+                        redo_stack.clearRetainingCapacity();
+                        
+                        // Copy as many bytes as will fit into input_buffer
+                        for (clip_data) |c| {
+                            if (input_len < input_buffer.len - 1) {
+                                input_buffer[input_len] = c;
+                                input_len += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        
+                        // Re-parse so xml_output + xml_display update
+                        parseInput();
+                        std.log.info("Pasted {} characters from clipboard", .{clip_data.len});
+                    } else {
+                        std.log.warn("Can only paste into a value (after first tab)", .{});
                     }
                 } else {
-                    std.log.warn("📋 Clipboard empty or unavailable", .{});
+                    std.log.warn("Clipboard empty or unavailable", .{});
                 }
                 return;
             }
             
             if (key == .ESCAPE) {
-                std.log.info("🚪 ESC pressed - quitting application", .{});
+                std.log.info("ESC pressed - quitting application", .{});
                 sapp.quit();
                 return;
             }
@@ -526,34 +397,34 @@ export fn event(e: [*c]const sapp.Event) void {
                 
                 if (is_ctrl or is_shift) {
                     // Clipboard action: copy XML to clipboard and quit
-                    std.log.info("📋 CLIPBOARD ACTION: Copying XML to clipboard (Ctrl={}, Shift={})", .{ is_ctrl, is_shift });
+                    std.log.info("CLIPBOARD ACTION: Copying XML to clipboard (Ctrl={}, Shift={})", .{ is_ctrl, is_shift });
                     const xml_slice = xml_output[0..xml_len];
-                    std.log.info("📋 XML to copy: '{s}' (length: {})", .{ xml_slice, xml_slice.len });
+                    std.log.info("XML to copy: '{s}' (length: {})", .{ xml_slice, xml_slice.len });
                     
-                    if (copyToClipboard(xml_slice)) {
-                        std.log.info("✅ XML copied to clipboard successfully", .{});
-                        std.log.info("📋 Clipboard content: '{s}'", .{xml_slice});
+                    if (win_api.copyToClipboard(xml_slice)) {
+                        std.log.info("XML copied to clipboard successfully", .{});
+                        std.log.info("Clipboard content: '{s}'", .{xml_slice});
                     } else {
-                        std.log.err("❌ Failed to copy XML to clipboard", .{});
+                        std.log.err("Failed to copy XML to clipboard", .{});
                     }
                     sapp.quit();
                 } else {
                     // Type action: set up to type XML after window closes
-                    std.log.info("⌨️  TYPE ACTION: Setting up to type XML after exit", .{});
-                    std.log.info("📝 Current XML length: {}", .{xml_len});
-                    std.log.info("📝 Current XML content: '{s}'", .{xml_output[0..xml_len]});
+                    std.log.info("TYPE ACTION: Setting up to type XML after exit", .{});
+                    std.log.info("Current XML length: {}", .{xml_len});
+                    std.log.info("Current XML content: '{s}'", .{xml_output[0..xml_len]});
                     
                     if (xml_len > 0) {
-                        g_xml_data_for_typing_action = std.heap.page_allocator.alloc(u8, xml_len) catch |err| {
-                            std.log.err("❌ Failed to allocate memory for type action XML: {}", .{err});
+                        xml_data_for_typing_action = std.heap.page_allocator.alloc(u8, xml_len) catch |err| {
+                            std.log.err("Failed to allocate memory for type action XML: {}", .{err});
                             return;
                         };
-                        @memcpy(g_xml_data_for_typing_action.?, xml_output[0..xml_len]);
-                        g_initiate_type_action = true;
-                        std.log.info("✅ Type action data prepared - will execute after window closes", .{});
+                        @memcpy(xml_data_for_typing_action.?, xml_output[0..xml_len]);
+                        initiate_type_action = true;
+                        std.log.info("Type action data prepared - will execute after window closes", .{});
                         sapp.quit();
                     } else {
-                        std.log.warn("⚠️  No XML data to type. Skipping type action.", .{});
+                        std.log.warn("No XML data to type. Skipping type action.", .{});
                         sapp.quit();
                     }
                 }
@@ -570,7 +441,7 @@ export fn event(e: [*c]const sapp.Event) void {
                     input_buffer[input_len] = '\t';
                     input_len += 1;
                     parseInput(); // Update XML when input changes
-                    std.log.info("⇥ Added tab character", .{});
+                    std.log.info("Added tab character", .{});
                 }
                 return;
             }
@@ -582,7 +453,7 @@ export fn event(e: [*c]const sapp.Event) void {
                     input_len -= 1;
                     input_buffer[input_len] = 0;
                     parseInput(); // Update XML when input changes
-                    std.log.info("⌫ Backspace", .{});
+                    std.log.info("Backspace", .{});
                 }
                 return;
             }
@@ -595,7 +466,7 @@ export fn event(e: [*c]const sapp.Event) void {
                     input_buffer[input_len] = char;
                     input_len += 1;
                     parseInput(); // Update XML when input changes
-                    std.log.info("✏️  Added '{c}'", .{char});
+                    std.log.info("Added '{c}'", .{char});
                 }
             }
         },
@@ -664,10 +535,10 @@ export fn cleanup() void {
 }
 
 pub fn main() void {
-    std.log.info("🚀 Starting Tag UI Application", .{});
-    std.log.info("💡 Instructions:", .{});
+    std.log.info("Starting Tag UI Application", .{});
+    std.log.info("Instructions:", .{});
     std.log.info("   ESC = quit immediately", .{});
-    std.log.info("   ENTER = close and process text", .{});
+    std.log.info("   ENTER = type XML to active window and quit", .{});
     std.log.info("   TAB = add tab character", .{});
     std.log.info("   CTRL+ENTER or SHIFT+ENTER = copy to clipboard and quit", .{});
     std.log.info("   CTRL+V = paste clipboard content (only after first tab)", .{});
@@ -679,7 +550,7 @@ pub fn main() void {
     // Calculate desired window position based on current mouse location
     calculateDesiredWindowPosition();
     
-    std.log.info("🎮 Starting main application loop...", .{});
+    std.log.info("Starting main application loop...", .{});
     sapp.run(.{
         .init_cb = init,
         .frame_cb = frame,
@@ -691,27 +562,27 @@ pub fn main() void {
         .logger = .{ .func = slog.func },
     });
     
-    std.log.info("🏁 Main application loop ended", .{});
+    std.log.info("Main application loop ended", .{});
     
     // Check if we need to perform post-exit type action
-    std.log.info("🔍 Checking for post-exit type action...", .{});
-    std.log.info("🔍 g_initiate_type_action = {}", .{g_initiate_type_action});
+    std.log.info("Checking for post-exit type action...", .{});
+    std.log.info("initiate_type_action = {}", .{initiate_type_action});
     
-    if (g_initiate_type_action) {
-        std.log.info("🎯 Post-exit type action requested - executing...", .{});
+    if (initiate_type_action) {
+        std.log.info("Post-exit type action requested - executing...", .{});
         executePostExitTypeAction();
         
         // Free the allocated memory
-        if (g_xml_data_for_typing_action) |data| {
-            std.log.info("🧹 Cleaning up allocated memory for type action", .{});
+        if (xml_data_for_typing_action) |data| {
+            std.log.info("Cleaning up allocated memory for type action", .{});
             std.heap.page_allocator.free(data);
-            g_xml_data_for_typing_action = null;
+            xml_data_for_typing_action = null;
         }
     } else {
-        std.log.info("ℹ️  No post-exit type action requested", .{});
+        std.log.info("No post-exit type action requested", .{});
     }
     
-    std.log.info("🏁 Application completely finished", .{});
+    std.log.info("Application completely finished", .{});
 }
 
 test "simple tag" {
@@ -897,8 +768,7 @@ test "text wrapping functionality" {
     xml_display_len = 0;
 }
 
-/// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
-const lib = @import("zig_lib");
+
 
 // Parse the input buffer and populate parsed_data
 fn parseInput() void {
@@ -1143,6 +1013,9 @@ fn appendEscapedToXMLDisplay(text: []const u8) void {
 const MAX_CHARS_PER_LINE: usize = 42; // Good balance of space usage and safety
 const MAX_LINES: usize = 8; // Maximum lines that fit in the display area
 
+// XML display formatting constants
+const XML_EXTRA_NEWLINES = "\n\n\n"; // Extra newlines for better visual separation
+
 fn appendToXMLDisplayWithWrapping(text: []const u8) void {
     var current_line_length: usize = 0;
     
@@ -1255,7 +1128,9 @@ fn generateXMLDisplay() void {
     }
     
     // Enhanced visual spacing for display: add extra newlines to make empty line more visible
-    appendToXMLDisplayWithWrapping(">\n\n\n</");  // Extra newline for better visual separation
+    appendToXMLDisplayWithWrapping(">");
+    appendToXMLDisplayWithWrapping(XML_EXTRA_NEWLINES);
+    appendToXMLDisplayWithWrapping("</");
     appendToXMLDisplayWithWrapping(tag_name);
     appendToXMLDisplayWithWrapping(">");
 }
@@ -1289,79 +1164,7 @@ fn parseInputString(input: []const u8) [8192]u8 {
     return result;
 }
 
-fn getClipboardText() ?[]u8 {
-    if (OpenClipboard(null) == 0) {
-        std.log.err("Failed to open clipboard for reading", .{});
-        return null;
-    }
-    defer _ = CloseClipboard();
-    
-    const hData = GetClipboardData(CF_TEXT) orelse {
-        std.log.warn("No text data in clipboard", .{});
-        return null;
-    };
-    
-    const pData = GlobalLock(hData) orelse {
-        std.log.err("Failed to lock clipboard data", .{});
-        return null;
-    };
-    defer _ = GlobalUnlock(hData);
-    
-    // Cast to a null-terminated string and find the length
-    const clipboard_cstr: [*:0]const u8 = @ptrCast(pData);
-    const clipboard_len = std.mem.len(clipboard_cstr);
-    
-    if (clipboard_len == 0) {
-        return null;
-    }
-    
-    // Allocate memory for the clipboard text
-    const clipboard_text = std.heap.page_allocator.alloc(u8, clipboard_len) catch {
-        std.log.err("Failed to allocate memory for clipboard text", .{});
-        return null;
-    };
-    
-    @memcpy(clipboard_text, clipboard_cstr[0..clipboard_len]);
-    return clipboard_text;
-}
 
-fn copyToClipboard(text: []const u8) bool {
-    if (OpenClipboard(null) == 0) {
-        std.log.err("Failed to open clipboard", .{});
-        return false;
-    }
-    defer _ = CloseClipboard();
-    
-    if (EmptyClipboard() == 0) {
-        std.log.err("Failed to empty clipboard", .{});
-        return false;
-    }
-    
-    // Allocate global memory for the text (including null terminator)
-    const hMem = GlobalAlloc(GMEM_MOVEABLE, text.len + 1) orelse {
-        std.log.err("Failed to allocate global memory", .{});
-        return false;
-    };
-    
-    // Lock the memory and copy text
-    if (GlobalLock(hMem)) |pMem| {
-        const dest: [*]u8 = @ptrCast(pMem);
-        @memcpy(dest[0..text.len], text);
-        dest[text.len] = 0; // null terminator
-        _ = GlobalUnlock(hMem);
-        
-        // Set clipboard data
-        if (SetClipboardData(CF_TEXT, hMem) == null) {
-            std.log.err("Failed to set clipboard data", .{});
-            return false;
-        }
-        
-        return true;
-    } else {
-        std.log.err("Failed to lock global memory", .{});
-        return false;
-    }
-}
 
 // SUI library wrapper functions
 extern fn sui_init_keyboard() void;
@@ -1370,34 +1173,34 @@ extern fn sui_send_shift_enter() void;
 extern fn sui_type_string(text: [*:0]const u8) void;
 
 fn executePostExitTypeAction() void {
-    std.log.info("🚀 === STARTING POST-EXIT TYPE ACTION ===", .{});
+    std.log.info("=== STARTING POST-EXIT TYPE ACTION ===", .{});
     
-    if (g_xml_data_for_typing_action == null) {
-        std.log.warn("⚠️  No XML data available for typing action", .{});
+    if (xml_data_for_typing_action == null) {
+        std.log.warn("No XML data available for typing action", .{});
         return;
     }
     
-    const xml_to_type = g_xml_data_for_typing_action.?;
-    std.log.info("📋 XML data length: {} bytes", .{xml_to_type.len});
-    std.log.info("📋 XML data content: '{s}'", .{xml_to_type});
+    const xml_to_type = xml_data_for_typing_action.?;
+    std.log.info("XML data length: {} bytes", .{xml_to_type.len});
+    std.log.info("XML data content: '{s}'", .{xml_to_type});
     
     // Initialize SUI for keyboard input
-    std.log.info("🔧 Initializing SUI library for keyboard input...", .{});
+    std.log.info("Initializing SUI library for keyboard input...", .{});
     sui_init_keyboard();
     
-    std.log.info("⏰ Waiting 50ms before typing to ensure target application is ready...", .{});
+    std.log.info("Waiting 50ms before typing to ensure target application is ready...", .{});
     std.time.sleep(50_000_000);
     
-    std.log.info("⌨️  Starting to type XML using SUI library with Shift+Enter line breaks...", .{});
+    std.log.info("Starting to type XML using SUI library with Shift+Enter line breaks...", .{});
     
     // Type the XML string with reliable Shift+Enter line breaks using SUI
     typeTextWithSUIShiftEnterLineBreaks(xml_to_type) catch |err| {
-        std.log.err("❌ Failed to type XML: {}", .{err});
-        std.log.err("💥 Type action failed - aborting", .{});
+        std.log.err("Failed to type XML: {}", .{err});
+        std.log.err("Type action failed - aborting", .{});
         return;
     };
     
-    std.log.info("🎯 Attempting to position cursor between opening and closing tags...", .{});
+    std.log.info("Attempting to position cursor between opening and closing tags...", .{});
     
     // Position cursor between the opening and closing tags
     // Find the end of the opening tag
@@ -1405,30 +1208,30 @@ fn executePostExitTypeAction() void {
         if (std.mem.indexOf(u8, xml_to_type, "</")) |closing_start| {
             // Check if there are newlines between the tags
             const between_tags = xml_to_type[(opening_end + 1)..closing_start];
-            std.log.info("🔍 Content between tags: '{s}'", .{between_tags});
+            std.log.info("Content between tags: '{s}'", .{between_tags});
             
             if (std.mem.indexOf(u8, between_tags, "\n")) |_| {
-                std.log.info("⬆️  Moving cursor up to position between tags...", .{});
+                std.log.info("Moving cursor up to position between tags...", .{});
                 // Move cursor up to position between tags using SUI
                 sui_press_key(38); // VK_UP = 38
-                std.log.info("✅ Cursor positioning completed", .{});
+                std.log.info("Cursor positioning completed", .{});
             } else {
-                std.log.info("ℹ️  No newlines between tags, cursor positioning not needed", .{});
+                std.log.info("No newlines between tags, cursor positioning not needed", .{});
             }
         } else {
-            std.log.warn("⚠️  Could not find closing tag in XML", .{});
+            std.log.warn("Could not find closing tag in XML", .{});
         }
     } else {
-        std.log.warn("⚠️  Could not find opening tag end in XML", .{});
+        std.log.warn("Could not find opening tag end in XML", .{});
     }
     
-    std.log.info("🎉 === TYPE ACTION COMPLETED SUCCESSFULLY ===", .{});
+    std.log.info("=== TYPE ACTION COMPLETED SUCCESSFULLY ===", .{});
 }
 
 fn typeTextWithSUIShiftEnterLineBreaks(text: []const u8) !void {
-    std.log.info("🎯 Starting to type text with SUI Shift+Enter line breaks", .{});
-    std.log.info("📝 Text to type: '{s}'", .{text});
-    std.log.info("📏 Text length: {} characters", .{text.len});
+    std.log.info("Starting to type text with SUI Shift+Enter line breaks", .{});
+    std.log.info("Text to type: '{s}'", .{text});
+    std.log.info("Text length: {} characters", .{text.len});
     
     // Type text line by line, using SUI Shift+Enter for line breaks
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -1436,24 +1239,24 @@ fn typeTextWithSUIShiftEnterLineBreaks(text: []const u8) !void {
     var line_number: usize = 1;
     
     while (lines.next()) |line| {
-        std.log.info("📄 Processing line {}: '{s}' (length: {})", .{ line_number, line, line.len });
+        std.log.info("Processing line {}: '{s}' (length: {})", .{ line_number, line, line.len });
         
         if (!first_line) {
-            std.log.info("⏎ Sending Shift+Enter for line break using SUI...", .{});
+            std.log.info("Sending Shift+Enter for line break using SUI...", .{});
             // Send Shift+Enter for line break using SUI
             sui_send_shift_enter();
             
             // Small delay for reliability
-            std.log.info("⏱️  Waiting 15ms after Shift+Enter...", .{});
+            std.log.info("Waiting 15ms after Shift+Enter...", .{});
             std.time.sleep(15_000_000); // 15ms delay
         }
         
         // Type the line content using SUI
         if (line.len > 0) {
             // Create null-terminated string for C function and type the line using SUI
-            std.log.info("⌨️ Typing line {}: '{s}'", .{ line_number, line });
+            std.log.info("Typing line {}: '{s}'", .{ line_number, line });
             var line_cstr = std.heap.page_allocator.allocSentinel(u8, line.len, 0) catch |err| {
-                std.log.err("❌ Failed to allocate memory for line: {}", .{err});
+                std.log.err("Failed to allocate memory for line: {}", .{err});
                 return err;
             };
             defer std.heap.page_allocator.free(line_cstr);
@@ -1461,15 +1264,15 @@ fn typeTextWithSUIShiftEnterLineBreaks(text: []const u8) !void {
             @memcpy(line_cstr[0..line.len], line);
             sui_type_string(line_cstr.ptr);
 
-            std.log.info("✅ Successfully typed line content using SUI", .{});
+            std.log.info("Successfully typed line content using SUI", .{});
             std.time.sleep(5_000_000); // 5ms delay
         } else {
-            std.log.info("⭕ Skipping empty line", .{});
+            std.log.info("Skipping empty line", .{});
         }
         
         first_line = false;
         line_number += 1;
     }
     
-    std.log.info("🎉 Finished typing all lines using SUI!", .{});
+    std.log.info("Finished typing all lines using SUI!", .{});
 }
