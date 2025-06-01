@@ -6,55 +6,16 @@ const slog = sokol.log;
 const sglue = sokol.glue;
 const sdtx = sokol.debugtext;
 const win_api = @import("windows_api.zig");
+const xml_gen = @import("xml_generator.zig");
+const undo_redo = @import("undo_redo.zig");
 
-// Parsed token data
-const Token = struct {
-    text: [256]u8 = undefined,
-    len: usize = 0,
-    
-    fn init() Token {
-        return Token{};
-    }
-    
-    fn set(self: *Token, text: []const u8) void {
-        self.len = @min(text.len, 255);
-        @memcpy(self.text[0..self.len], text[0..self.len]);
-        self.text[self.len] = 0; // null terminate
-    }
-    
-    fn slice(self: *const Token) []const u8 {
-        return self.text[0..self.len];
-    }
-    
-    fn isEmpty(self: *const Token) bool {
-        return self.len == 0;
-    }
-};
 
-const ParsedInput = struct {
-    tag_name: Token = Token.init(),
-    attributes: [16]Token = [_]Token{Token.init()} ** 16,
-    attr_count: usize = 0,
-    is_boolean: [16]bool = [_]bool{false} ** 16, // Track which attributes are boolean
-    
-    fn clear(self: *ParsedInput) void {
-        self.tag_name = Token.init();
-        self.attr_count = 0;
-        for (&self.attributes) |*attr| {
-            attr.* = Token.init();
-        }
-        for (&self.is_boolean) |*flag| {
-            flag.* = false;
-        }
-    }
-};
 
 // App state
 var input_buffer: [4096]u8 = undefined;
 var input_len: usize = 0;
 
 var large_text_context: sdtx.Context = undefined;
-var parsed_data: ParsedInput = ParsedInput{};
 var xml_output: [8192]u8 = undefined;
 var xml_len: usize = 0;
 var xml_display: [8192]u8 = undefined;  // Display version with better visual spacing
@@ -75,16 +36,9 @@ var xml_data_for_typing_action: ?[]u8 = null;
 // ────────────────────────────────────────────────────────────────────────────────
 // Undo/Redo functionality
 // ────────────────────────────────────────────────────────────────────────────────
-const MAX_BUFFER = 4096;
 
-const StateSnapshot = struct {
-    buffer: [MAX_BUFFER]u8, // a full copy of the input buffer
-    len: usize,             // how many of those bytes are "in use"
-};
-
-// Undo / redo stacks:
-var undo_stack: std.ArrayList(StateSnapshot) = undefined;
-var redo_stack: std.ArrayList(StateSnapshot) = undefined;
+// Undo/redo system instance
+var undo_redo_system: undo_redo.UndoRedoSystem = undefined;
 
 
 
@@ -144,22 +98,13 @@ export fn init() void {
     input_len = 0;
     
     // ────────────────────────────────────────────────────────────────────────────
-    // Initialize undo/redo stacks using the page_allocator
+    // Initialize undo/redo system
     // ────────────────────────────────────────────────────────────────────────────
-    undo_stack = std.ArrayList(StateSnapshot).init(std.heap.page_allocator);
-    redo_stack = std.ArrayList(StateSnapshot).init(std.heap.page_allocator);
+    undo_redo_system = undo_redo.UndoRedoSystem.init();
 
     // Before the user types anything, capture the "empty" state for undo.
-    const emptySnapshot = StateSnapshot{
-        .buffer = undefined,
-        .len = input_len, // 0 at startup
-    };
-    // Initialize buffer to zeros (it's already zeroed by memset above)
-    var initial_snap = emptySnapshot;
-    @memcpy(initial_snap.buffer[0..initial_snap.len], input_buffer[0..initial_snap.len]);
-    _ = undo_stack.append(initial_snap) catch {
-        std.log.err("Failed to initialize undo stack", .{});
-    };
+    const initial_state = input_buffer[0..input_len];
+    undo_redo_system.pushSnapshot(initial_state);
     
     // Initialize the XML output with placeholder
     parseInput();
@@ -208,43 +153,50 @@ export fn frame() void {
     const char_height: f32 = 8.0;
     const grid_height = canvas_height / char_height;
     
-    // Render hint text at bottom left corner (normal size) - 6 lines with colors
+    // Render hint text at bottom left corner (normal size) - 7 lines with colors
     // Line 1: ENTER closes and processes
-    sdtx.pos(0.5, grid_height - 6.5);
+    sdtx.pos(0.5, grid_height - 7.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for ENTER
     sdtx.puts("      ENTER"); // Padded to align with " CTRL +ENTER"
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" type");
     
     // Line 2: CTRL+ENTER clipboard 
-    sdtx.pos(0.5, grid_height - 5.5);
+    sdtx.pos(0.5, grid_height - 6.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+ENTER
     sdtx.puts("CTRL +ENTER");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" clipboard");
     
     // Line 3: CTRL+V paste
-    sdtx.pos(0.5, grid_height - 4.5);
+    sdtx.pos(0.5, grid_height - 5.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+V
     sdtx.puts("CTRL +V    ");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" paste");
     
     // Line 4: CTRL+Z undo
-    sdtx.pos(0.5, grid_height - 3.5);
+    sdtx.pos(0.5, grid_height - 4.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+Z
     sdtx.puts("CTRL +Z    ");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" undo");
     
     // Line 5: CTRL+Y redo
-    sdtx.pos(0.5, grid_height - 2.5);
+    sdtx.pos(0.5, grid_height - 3.5);
     sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+Y
     sdtx.puts("CTRL +Y    ");
     sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
     sdtx.puts(" redo");
     
-    // Line 6: ESC cancels
+    // Line 6: CTRL+S toggle
+    sdtx.pos(0.5, grid_height - 2.5);
+    sdtx.color3f(0.4, 0.8, 0.4); // Green for CTRL+S
+    sdtx.puts("CTRL +S    ");
+    sdtx.color3f(0.7, 0.7, 0.7); // Gray for explanation
+    sdtx.puts(" toggle");
+    
+    // Line 7: ESC cancels
     sdtx.pos(0.5, grid_height - 1.5);
     sdtx.color3f(0.8, 0.4, 0.4); // Red for ESC
     sdtx.puts("ESC        "); // Padded to align
@@ -261,64 +213,30 @@ export fn frame() void {
 
 
 
-/// Create a full copy of input_buffer + input_len.
-fn snapshotCurrentState() StateSnapshot {
-    var s: StateSnapshot = StateSnapshot{
-        .buffer = undefined,
-        .len = input_len,
-    };
-    @memcpy(s.buffer[0..s.len], input_buffer[0..s.len]);
-    return s;
-}
-
-/// Overwrite input_buffer + input_len from a snapshot, then re-parse.
-fn restoreState(s: StateSnapshot) void {
-    input_len = s.len;
-    @memcpy(input_buffer[0..s.len], s.buffer[0..s.len]);
-    parseInput();
-}
-
 /// Push the current state onto the undo stack.
 fn pushUndoSnapshot() void {
-    const snap = snapshotCurrentState();
-    _ = undo_stack.append(snap) catch {
-        std.log.err("undo_stack.append failed", .{});
-        return;
-    };
+    const current_state = input_buffer[0..input_len];
+    undo_redo_system.pushSnapshot(current_state);
 }
 
-/// Perform "undo" (Ctrl+Z). Restore the last snapshot from undo_stack, push current onto redo_stack.
+/// Perform "undo" (Ctrl+Z). Restore the last snapshot from undo system.
 fn undoAction() void {
-    if (undo_stack.items.len == 0) {
-        return; // nothing to undo
+    const current_state = input_buffer[0..input_len];
+    if (undo_redo_system.undo(current_state)) |snapshot| {
+        input_len = snapshot.len;
+        @memcpy(input_buffer[0..snapshot.len], snapshot.slice());
+        parseInput();
     }
-    // Pop the most recent snapshot
-    const lastSnap = undo_stack.pop() orelse return;
-
-    // Before we restore "lastSnap," push *current* state onto redo_stack
-    const currentSnap = snapshotCurrentState();
-    _ = redo_stack.append(currentSnap) catch {
-        std.log.err("redo_stack.append failed", .{});
-    };
-
-    // Now restore
-    restoreState(lastSnap);
 }
 
 /// Perform "redo" (Ctrl+Y). Opposite of undo.
 fn redoAction() void {
-    if (redo_stack.items.len == 0) {
-        return; // nothing to redo
+    const current_state = input_buffer[0..input_len];
+    if (undo_redo_system.redo(current_state)) |snapshot| {
+        input_len = snapshot.len;
+        @memcpy(input_buffer[0..snapshot.len], snapshot.slice());
+        parseInput();
     }
-    const nextSnap = redo_stack.pop() orelse return;
-
-    // Push current onto undo_stack
-    const currentSnap = snapshotCurrentState();
-    _ = undo_stack.append(currentSnap) catch {
-        std.log.err("undo_stack.append failed", .{});
-    };
-
-    restoreState(nextSnap);
 }
 
 export fn event(e: [*c]const sapp.Event) void {
@@ -343,6 +261,18 @@ export fn event(e: [*c]const sapp.Event) void {
                 return;
             }
             
+            // Handle Ctrl+S (toggle XML mode)
+            if (key == .S and (modifiers & 0x02) != 0) {
+                const new_mode = xml_gen.toggleXMLMode();
+                const mode_name = switch (new_mode) {
+                    .regular => "regular XML tags",
+                    .self_closing => "self-closing XML tags",
+                };
+                std.log.info("Toggled to {s} mode", .{mode_name});
+                parseInput(); // Regenerate XML with new mode
+                return;
+            }
+            
             // Handle Ctrl+V (paste) - only for values (after first tab)
             if (key == .V and (modifiers & 0x02) != 0) {
                 if (win_api.getClipboardText()) |clip_data| {
@@ -360,8 +290,6 @@ export fn event(e: [*c]const sapp.Event) void {
                                         if (seen_tab) {
                         // Snapshot current state for undo
                         pushUndoSnapshot();
-                        // Clear redo history for big edits like paste
-                        redo_stack.clearRetainingCapacity();
                         
                         // Copy as many bytes as will fit into input_buffer
                         for (clip_data) |c| {
@@ -434,8 +362,6 @@ export fn event(e: [*c]const sapp.Event) void {
             if (key == .TAB) {
                 // Snapshot before inserting the tab (completes a "thing")
                 pushUndoSnapshot();
-                // Clear redo history for big edits like tab completion
-                redo_stack.clearRetainingCapacity();
                 
                 if (input_len < input_buffer.len - 1) {
                     input_buffer[input_len] = '\t';
@@ -544,6 +470,7 @@ pub fn main() void {
     std.log.info("   CTRL+V = paste clipboard content (only after first tab)", .{});
     std.log.info("   CTRL+Z = undo last action", .{});
     std.log.info("   CTRL+Y = redo last undone action", .{});
+    std.log.info("   CTRL+S = toggle between regular and self-closing XML tags", .{});
     std.log.info("   Type to add characters", .{});
     std.log.info("", .{});
     
@@ -658,67 +585,55 @@ test "tilde characters preserved" {
 }
 
 test "undo/redo state snapshot functionality" {
-    // Test that we can create and restore snapshots
-    const original_input_len = input_len;
-    const original_input_buffer = input_buffer;
+    // Test that we can create and restore snapshots using the undo/redo system
+    var test_system = undo_redo.UndoRedoSystem.init();
     
-    // Set up test state
-    input_len = 5;
-    @memcpy(input_buffer[0..5], "hello");
+    // Test snapshot creation
+    const test_data = "hello";
+    test_system.pushSnapshot(test_data);
+    try std.testing.expect(test_system.canUndo());
+    try std.testing.expect(!test_system.canRedo());
     
-    // Create snapshot
-    const snapshot = snapshotCurrentState();
-    try std.testing.expect(snapshot.len == 5);
-    try std.testing.expectEqualStrings(snapshot.buffer[0..5], "hello");
+    // Test undo
+    const current_data = "world";
+    if (test_system.undo(current_data)) |snapshot| {
+        try std.testing.expectEqualStrings(snapshot.slice(), "hello");
+        try std.testing.expect(test_system.canRedo());
+    } else {
+        try std.testing.expect(false); // Should have been able to undo
+    }
     
-    // Modify state
-    input_len = 3;
-    @memcpy(input_buffer[0..3], "bye");
-    
-    // Restore snapshot
-    restoreState(snapshot);
-    try std.testing.expect(input_len == 5);
-    try std.testing.expectEqualStrings(input_buffer[0..5], "hello");
-    
-    // Restore original state
-    input_len = original_input_len;
-    input_buffer = original_input_buffer;
+    // Test redo
+    if (test_system.redo("hello")) |snapshot| {
+        try std.testing.expectEqualStrings(snapshot.slice(), "world");
+    } else {
+        try std.testing.expect(false); // Should have been able to redo
+    }
 }
 
 test "undo/redo stack operations" {
-    // Initialize stacks for testing
-    var test_undo_stack = std.ArrayList(StateSnapshot).init(std.testing.allocator);
-    defer test_undo_stack.deinit();
-    var test_redo_stack = std.ArrayList(StateSnapshot).init(std.testing.allocator);
-    defer test_redo_stack.deinit();
+    // Test the undo stack directly
+    var test_stack = undo_redo.UndoStack(undo_redo.StateSnapshot, 10).init();
     
     // Test that we can push and pop snapshots
-    const snapshot1 = StateSnapshot{
-        .buffer = undefined,
-        .len = 3,
-    };
-    var snap1 = snapshot1;
-    @memcpy(snap1.buffer[0..3], "abc");
-    
-    const snapshot2 = StateSnapshot{
-        .buffer = undefined,
-        .len = 5,
-    };
-    var snap2 = snapshot2;
-    @memcpy(snap2.buffer[0..5], "hello");
+    const snap1 = undo_redo.createSnapshot("abc");
+    const snap2 = undo_redo.createSnapshot("hello");
     
     // Push snapshots
-    try test_undo_stack.append(snap1);
-    try test_undo_stack.append(snap2);
+    test_stack.push(snap1);
+    test_stack.push(snap2);
+    try std.testing.expect(test_stack.len() == 2);
     
     // Pop and verify
-    const popped = test_undo_stack.pop() orelse unreachable;
+    const popped = test_stack.pop() orelse unreachable;
     try std.testing.expect(popped.len == 5);
-    try std.testing.expectEqualStrings(popped.buffer[0..5], "hello");
+    try std.testing.expectEqualStrings(popped.slice(), "hello");
     
-    const popped2 = test_undo_stack.pop() orelse unreachable;
+    const popped2 = test_stack.pop() orelse unreachable;
     try std.testing.expect(popped2.len == 3);
-    try std.testing.expectEqualStrings(popped2.buffer[0..3], "abc");
+    try std.testing.expectEqualStrings(popped2.slice(), "abc");
+    
+    try std.testing.expect(test_stack.len() == 0);
 }
 
 test "quote escaping in attribute values" {
@@ -743,18 +658,17 @@ test "ampersand escaping" {
 }
 
 test "text wrapping functionality" {
-    // Test the wrapping function with a long string that should wrap
-    xml_display_len = 0;
-    const long_text = "This is a very long text that should definitely wrap at the specified character limit to test our wrapping functionality properly";
-    appendToXMLDisplayWithWrapping(long_text);
+    // Test with a long tag that should wrap
+    const input = "div\tclass\tThis-is-a-very-long-class-name-that-should-definitely-wrap-at-the-specified-character-limit-to-test-our-wrapping-functionality-properly";
+    const result = xml_gen.parseAndGenerateXML(input);
     
-    // Verify that newlines were inserted
-    const result = xml_display[0..xml_display_len];
-    const has_newlines = std.mem.indexOf(u8, result, "\n") != null;
+    // Verify that newlines were inserted in the display version
+    const display_result = result.xml_display[0..result.xml_display_len];
+    const has_newlines = std.mem.indexOf(u8, display_result, "\n") != null;
     try std.testing.expect(has_newlines);
     
     // Verify the line length is approximately correct (should be around 42 chars per line)
-    var lines = std.mem.splitScalar(u8, result, '\n');
+    var lines = std.mem.splitScalar(u8, display_result, '\n');
     var line_count: usize = 0;
     while (lines.next()) |line| {
         if (line.len > 0) {
@@ -763,405 +677,85 @@ test "text wrapping functionality" {
         }
     }
     try std.testing.expect(line_count >= 2); // Should have wrapped into at least 2 lines
+}
+
+test "XML mode toggle functionality" {
+    // Save original mode and restore it at the end
+    const original_mode = xml_gen.getXMLMode();
+    defer xml_gen.setXMLMode(original_mode);
     
-    // Reset for next test
-    xml_display_len = 0;
+    // Start in regular mode 
+    xml_gen.setXMLMode(.regular);
+    try std.testing.expect(xml_gen.getXMLMode() == .regular);
+    
+    // Test regular mode output
+    const regular_result = xml_gen.parseAndGenerateXML("div\tclass\tcontainer");
+    const regular_xml = std.mem.sliceTo(&regular_result.xml, 0);
+    try std.testing.expectEqualStrings("<div class=\"container\">\n\n</div>", regular_xml);
+    
+    // Toggle to self-closing mode
+    const new_mode = xml_gen.toggleXMLMode();
+    try std.testing.expect(new_mode == .self_closing);
+    try std.testing.expect(xml_gen.getXMLMode() == .self_closing);
+    
+    // Test self-closing mode output
+    const self_closing_result = xml_gen.parseAndGenerateXML("div\tclass\tcontainer");
+    const self_closing_xml = std.mem.sliceTo(&self_closing_result.xml, 0);
+    try std.testing.expectEqualStrings("<div class=\"container\" />\n", self_closing_xml);
+    
+    // Toggle back to regular mode
+    const back_to_regular = xml_gen.toggleXMLMode();
+    try std.testing.expect(back_to_regular == .regular);
+    try std.testing.expect(xml_gen.getXMLMode() == .regular);
+}
+
+test "self-closing XML with boolean attributes" {
+    // Save original mode and restore it at the end
+    const original_mode = xml_gen.getXMLMode();
+    defer xml_gen.setXMLMode(original_mode);
+    
+    // Test self-closing mode with boolean attributes
+    xml_gen.setXMLMode(.self_closing);
+    
+    const result = xml_gen.parseAndGenerateXML("input\ttype\ttext\thidden\t\trequired");
+    const xml_str = std.mem.sliceTo(&result.xml, 0);
+    try std.testing.expectEqualStrings("<input type=\"text\" hidden required />\n", xml_str);
+}
+
+test "self-closing XML with no attributes" {
+    // Save original mode and restore it at the end
+    const original_mode = xml_gen.getXMLMode();
+    defer xml_gen.setXMLMode(original_mode);
+    
+    // Test self-closing mode with no attributes
+    xml_gen.setXMLMode(.self_closing);
+    
+    const result = xml_gen.parseAndGenerateXML("br");
+    const xml_str = std.mem.sliceTo(&result.xml, 0);
+    try std.testing.expectEqualStrings("<br />\n", xml_str);
 }
 
 
 
-// Parse the input buffer and populate parsed_data
+// Parse the input buffer and generate XML using the XML generator module
 fn parseInput() void {
-    parsed_data.clear();
+    const input_slice = input_buffer[0..input_len];
+    const result = xml_gen.parseAndGenerateXML(input_slice);
     
-    if (input_len == 0) {
-        generateXML();
-        generateXMLDisplay();
-        return;
-    }
-    
-    // Split by tabs to get tokens
-    var tokens: [32]Token = [_]Token{Token.init()} ** 32;
-    var token_count: usize = 0;
-    
-    var start: usize = 0;
-    var i: usize = 0;
-    
-    while (i <= input_len) : (i += 1) {
-        if (i == input_len or input_buffer[i] == '\t') {
-            // Always add a token, even if empty (for consecutive tabs)
-            if (token_count < 32) {
-                if (start < i) {
-                    tokens[token_count].set(input_buffer[start..i]);
-                } // else leave it empty for consecutive tabs
-                token_count += 1;
-            }
-            start = i + 1;
-        }
-    }
-    
-    // First token is always the tag name
-    if (token_count > 0) {
-        parsed_data.tag_name.set(cleanTagName(tokens[0].slice()));
-        
-        // Process remaining tokens as attributes
-        var attr_idx: usize = 0;
-        var i_token: usize = 1;
-        
-        while (i_token < token_count and attr_idx < 16) {
-            // Skip any empty tokens at the start
-            while (i_token < token_count and tokens[i_token].isEmpty()) {
-                i_token += 1;
-            }
-            
-            if (i_token >= token_count) break;
-            
-            // Current token is an attribute name
-            const attr_name = cleanAttributeName(tokens[i_token].slice());
-            parsed_data.attributes[attr_idx].set(attr_name);
-            i_token += 1;
-            
-            // Check the next token to see if it's a value
-            if (i_token < token_count) {
-                if (tokens[i_token].isEmpty()) {
-                    // Next token is empty - this attribute is boolean
-                    parsed_data.is_boolean[attr_idx] = true;
-                    // Skip the empty token
-                    i_token += 1;
-                } else {
-                    // Next token is non-empty - this is the value for the attribute
-                    parsed_data.is_boolean[attr_idx] = false;
-                    if (attr_idx + 1 < 16) {
-                        const attr_value = tokens[i_token].slice();
-                        parsed_data.attributes[attr_idx + 1].set(attr_value);
-                        attr_idx += 1; // Extra increment for the value
-                    }
-                    i_token += 1;
-                }
-            } else {
-                // No next token - this attribute is boolean by default
-                parsed_data.is_boolean[attr_idx] = true;
-            }
-            
-            attr_idx += 1;
-        }
-        
-        parsed_data.attr_count = attr_idx;
-    }
-    
-    generateXML();
-    generateXMLDisplay();
+    // Copy results to app state
+    xml_output = result.xml;
+    xml_len = result.xml_len;
+    xml_display = result.xml_display;
+    xml_display_len = result.xml_display_len;
 }
 
-// Clean tag/attribute names: spaces -> underscores, unsupported chars -> tilde, trim whitespace
-fn cleanTagName(input: []const u8) []const u8 {
-    var cleaned: [256]u8 = undefined;
-    var cleaned_len: usize = 0;
-    
-    // Trim and clean
-    const trimmed = std.mem.trim(u8, input, " \t\n\r");
-    for (trimmed) |char| {
-        if (cleaned_len >= 255) break;
-        if (char == ' ') {
-            cleaned[cleaned_len] = '_';
-            cleaned_len += 1;
-        } else if ((char >= 'A' and char <= 'Z') or 
-                   (char >= 'a' and char <= 'z') or 
-                   (char >= '0' and char <= '9') or 
-                   char == '_' or char == '-' or char == '~') {
-            cleaned[cleaned_len] = char;
-            cleaned_len += 1;
-        } else {
-            // Replace unsupported characters with tilde
-            cleaned[cleaned_len] = '~';
-            cleaned_len += 1;
-        }
-    }
-    
-    return cleaned[0..cleaned_len];
-}
 
-fn cleanAttributeName(input: []const u8) []const u8 {
-    return cleanTagName(input); // Same cleaning rules for now
-}
 
-// Generate XML from parsed data
-fn generateXML() void {
-    xml_len = 0;
-    
-    if (parsed_data.tag_name.isEmpty()) {
-        // Show placeholder if no input
-        const placeholder = "(type something...)";
-        @memcpy(xml_output[0..placeholder.len], placeholder);
-        xml_len = placeholder.len;
-        return;
-    }
-    
-    const tag_name = parsed_data.tag_name.slice();
-    
-    // Build opening tag with attributes
-    appendToXML("<");
-    appendToXML(tag_name);
-    
-    // Add attributes using boolean flags
-    var i: usize = 0;
-    while (i < parsed_data.attr_count) {
-        if (!parsed_data.attributes[i].isEmpty()) {
-            appendToXML(" ");
-            appendToXML(parsed_data.attributes[i].slice()); // attribute name
-            
-            if (!parsed_data.is_boolean[i]) {
-                // This is a key-value pair, next slot has the value
-                if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
-                    appendToXML("=\"");
-                    appendEscapedToXML(parsed_data.attributes[i + 1].slice());
-                    appendToXML("\"");
-                    i += 2; // Skip both name and value
-                } else {
-                    // Something went wrong, treat as boolean
-                    i += 1;
-                }
-            } else {
-                // This is a boolean attribute
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    
-    appendToXML(">\n\n</");
-    appendToXML(tag_name);
-    appendToXML(">");
-}
 
-fn appendToXML(text: []const u8) void {
-    const remaining = xml_output.len - xml_len;
-    const to_copy = @min(text.len, remaining);
-    if (to_copy > 0) {
-        @memcpy(xml_output[xml_len..xml_len + to_copy], text[0..to_copy]);
-        xml_len += to_copy;
-    }
-}
 
-fn appendEscapedToXML(text: []const u8) void {
-    for (text) |char| {
-        if (xml_len >= xml_output.len - 6) break; // Reserve space for longest escape sequence
-        
-        switch (char) {
-            '"' => {
-                appendToXML("&quot;");
-            },
-            '&' => {
-                appendToXML("&amp;");
-            },
-            '<' => {
-                appendToXML("&lt;");
-            },
-            '>' => {
-                appendToXML("&gt;");
-            },
-            else => {
-                if (xml_len < xml_output.len) {
-                    xml_output[xml_len] = char;
-                    xml_len += 1;
-                }
-            },
-        }
-    }
-}
-
-fn appendToXMLDisplay(text: []const u8) void {
-    const remaining = xml_display.len - xml_display_len;
-    const to_copy = @min(text.len, remaining);
-    if (to_copy > 0) {
-        @memcpy(xml_display[xml_display_len..xml_display_len + to_copy], text[0..to_copy]);
-        xml_display_len += to_copy;
-    }
-}
-
-fn appendEscapedToXMLDisplay(text: []const u8) void {
-    for (text) |char| {
-        if (xml_display_len >= xml_display.len - 6) break; // Reserve space for longest escape sequence
-        
-        switch (char) {
-            '"' => {
-                appendToXMLDisplay("&quot;");
-            },
-            '&' => {
-                appendToXMLDisplay("&amp;");
-            },
-            '<' => {
-                appendToXMLDisplay("&lt;");
-            },
-            '>' => {
-                appendToXMLDisplay("&gt;");
-            },
-            else => {
-                if (xml_display_len < xml_display.len) {
-                    xml_display[xml_display_len] = char;
-                    xml_display_len += 1;
-                }
-            },
-        }
-    }
-}
-
-// Text wrapping constants - calculated for fixed window size 450x180
-// Window width: 450px, text scale: 1.3, effective width: ~346px
-// Character width: ~8px, so ~43 chars fit, using 42 for good balance
-const MAX_CHARS_PER_LINE: usize = 42; // Good balance of space usage and safety
-const MAX_LINES: usize = 8; // Maximum lines that fit in the display area
-
-// XML display formatting constants
-const XML_EXTRA_NEWLINES = "\n\n\n"; // Extra newlines for better visual separation
-
-fn appendToXMLDisplayWithWrapping(text: []const u8) void {
-    var current_line_length: usize = 0;
-    
-    // Count current line length by looking backwards to last newline
-    if (xml_display_len > 0) {
-        var i: usize = xml_display_len;
-        while (i > 0) {
-            i -= 1;
-            if (xml_display[i] == '\n') {
-                current_line_length = xml_display_len - i - 1;
-                break;
-            }
-        } else {
-            current_line_length = xml_display_len;
-        }
-    }
-    
-    for (text) |char| {
-        if (xml_display_len >= xml_display.len - 1) break;
-        
-        // Check if we need to wrap
-        if (current_line_length >= MAX_CHARS_PER_LINE and char != '\n') {
-            // Add a line break
-            xml_display[xml_display_len] = '\n';
-            xml_display_len += 1;
-            current_line_length = 0;
-            
-            if (xml_display_len >= xml_display.len - 1) break;
-        }
-        
-        xml_display[xml_display_len] = char;
-        xml_display_len += 1;
-        
-        if (char == '\n') {
-            current_line_length = 0;
-        } else {
-            current_line_length += 1;
-        }
-    }
-}
-
-fn appendEscapedToXMLDisplayWithWrapping(text: []const u8) void {
-    for (text) |char| {
-        if (xml_display_len >= xml_display.len - 6) break; // Reserve space for longest escape sequence
-        
-        switch (char) {
-            '"' => {
-                appendToXMLDisplayWithWrapping("&quot;");
-            },
-            '&' => {
-                appendToXMLDisplayWithWrapping("&amp;");
-            },
-            '<' => {
-                appendToXMLDisplayWithWrapping("&lt;");
-            },
-            '>' => {
-                appendToXMLDisplayWithWrapping("&gt;");
-            },
-            else => {
-                const single_char = [1]u8{char};
-                appendToXMLDisplayWithWrapping(&single_char);
-            },
-        }
-    }
-}
-
-// Generate display version of XML with enhanced visual spacing and text wrapping
-fn generateXMLDisplay() void {
-    xml_display_len = 0;
-    
-    if (parsed_data.tag_name.isEmpty()) {
-        // Show placeholder if no input
-        const placeholder = "(type something...)";
-        @memcpy(xml_display[0..placeholder.len], placeholder);
-        xml_display_len = placeholder.len;
-        return;
-    }
-    
-    const tag_name = parsed_data.tag_name.slice();
-    
-    // Build opening tag with attributes
-    appendToXMLDisplayWithWrapping("<");
-    appendToXMLDisplayWithWrapping(tag_name);
-    
-    // Add attributes using boolean flags (same logic as original)
-    var i: usize = 0;
-    while (i < parsed_data.attr_count) {
-        if (!parsed_data.attributes[i].isEmpty()) {
-            appendToXMLDisplayWithWrapping(" ");
-            appendToXMLDisplayWithWrapping(parsed_data.attributes[i].slice()); // attribute name
-            
-            if (!parsed_data.is_boolean[i]) {
-                // This is a key-value pair, next slot has the value
-                if (i + 1 < parsed_data.attr_count and !parsed_data.attributes[i + 1].isEmpty()) {
-                    appendToXMLDisplayWithWrapping("=\"");
-                    appendEscapedToXMLDisplayWithWrapping(parsed_data.attributes[i + 1].slice());
-                    appendToXMLDisplayWithWrapping("\"");
-                    i += 2; // Skip both name and value
-                } else {
-                    // Something went wrong, treat as boolean
-                    i += 1;
-                }
-            } else {
-                // This is a boolean attribute
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    
-    // Enhanced visual spacing for display: add extra newlines to make empty line more visible
-    appendToXMLDisplayWithWrapping(">");
-    appendToXMLDisplayWithWrapping(XML_EXTRA_NEWLINES);
-    appendToXMLDisplayWithWrapping("</");
-    appendToXMLDisplayWithWrapping(tag_name);
-    appendToXMLDisplayWithWrapping(">");
-}
-
-// Test function to parse input string and return XML
+// Test function to parse input string and return XML - delegates to XML generator
 fn parseInputString(input: []const u8) [8192]u8 {
-    // Save current state
-    const saved_input_len = input_len;
-    const saved_input_buffer = input_buffer;
-    const saved_xml_len = xml_len;
-    const saved_xml_output = xml_output;
-    
-    // Set up test input
-    input_len = @min(input.len, input_buffer.len - 1);
-    @memcpy(input_buffer[0..input_len], input[0..input_len]);
-    
-    // Parse and generate XML
-    parseInput();
-    
-    // Save result
-    var result: [8192]u8 = undefined;
-    @memcpy(result[0..xml_len], xml_output[0..xml_len]);
-    @memset(result[xml_len..], 0);
-    
-    // Restore state
-    input_len = saved_input_len;
-    input_buffer = saved_input_buffer;
-    xml_len = saved_xml_len;
-    xml_output = saved_xml_output;
-    
-    return result;
+    return xml_gen.parseInputString(input);
 }
 
 
