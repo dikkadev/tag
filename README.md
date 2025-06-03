@@ -6,20 +6,26 @@ A fast, lightweight Windows application for generating XML tags with attributes 
 
 ## Features
 
-- **Real-time XML generation** - Type and see XML output instantly
+- **Real-time XML generation** - See XML output update instantly as you type
 - **Intuitive syntax** - Use tabs to separate tag names, attributes, and values
+- **Smart attribute handling** - Automatically distinguishes boolean attributes from key-value pairs
 - **Two output modes**:
-  - **Type mode** (ENTER) - Types XML directly into any application with reliable Shift+Enter line breaks
-  - **Clipboard mode** (CTRL+ENTER or SHIFT+ENTER) - Copies XML to clipboard
-- **Smart attribute handling** - Automatically detects boolean vs key-value attributes
+  - **Type mode** (Enter) - Types XML directly into the active application with reliable Shift+Enter line breaks
+  - **Clipboard mode** (Ctrl+Enter or Shift+Enter) - Copies XML to clipboard
+- **Undo/Redo support** - Undo changes with Ctrl+Z and redo with Ctrl+Y
+- **Clipboard paste** - Paste clipboard content into a value (after first tab) using Ctrl+V
+- **XML mode toggle** - Switch between regular tags and self-closing tags (e.g., `<br />`) with Ctrl+S
+- **Special character escaping** - Replaces unsupported characters with `~` and escapes `&`, `<`, `>`, and `"` in attribute values
+- **Text wrapping** - Automatically wraps long lines in the display view for readability
 - **Multi-monitor support** - Opens on the monitor where your mouse cursor is located
-- **Clean, modern UI** - Built with Sokol graphics library
+- **Clean, modern UI** - Built with the Sokol graphics library
 
 ## Quick Start
 
 1. Run `tag.exe`
 2. Type your tag structure using tabs to separate elements
-3. Press ENTER to type the XML or CTRL+ENTER to copy to clipboard
+3. (Optional) Use Ctrl+V to paste clipboard content into an attribute value, Ctrl+Z/Ctrl+Y to undo/redo, or Ctrl+S to toggle between regular and self-closing tag modes
+4. Press Enter to type the XML into the active window, or Ctrl+Enter/Shift+Enter to copy XML to the clipboard and quit
 
 ## Examples
 
@@ -62,11 +68,15 @@ button<tab>disabled<tab><tab>type<tab>submit
 ## Controls
 
 - **Type characters** - Build your tag structure
-- **TAB** - Add tab character (separates tag name, attributes, values)
-- **ENTER** - Close app and type XML with reliable line breaks
-- **CTRL+ENTER** or **SHIFT+ENTER** - Copy XML to clipboard and quit
-- **ESC** - Cancel and quit immediately
+- **TAB** - Insert tab character (separates tag name, attributes, values)
 - **BACKSPACE** - Delete last character
+- **ENTER** - Close the app and type XML with reliable Shift+Enter line breaks
+- **CTRL+ENTER** or **SHIFT+ENTER** - Copy XML to clipboard and quit
+- **CTRL+V** - Paste clipboard content into a value (after first tab)
+- **CTRL+Z** - Undo last action
+- **CTRL+Y** - Redo last undone action
+- **CTRL+S** - Toggle between regular and self-closing XML modes
+- **ESC** - Cancel and quit immediately
 
 ## Building
 
