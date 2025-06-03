@@ -1,0 +1,77 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Generate CalVerLex version tag
+      id: version
+      uses: dikkadev/CalVerLex@main
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        year_format: '2'
+      
+    - name: Display generated version
+      run: |
+        Write-Host "🏷️ Generated version tag: ${{ steps.version.outputs.tag }}" -ForegroundColor Green
+        Write-Host "📅 CalVerLex format: YYWWD + suffix (Year-Week-Day + lexical suffix)" -ForegroundColor Cyan
+      shell: pwsh
+      
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.0
+        
+    - name: Verify Zig installation
+      run: zig version
+      
+    - name: Fetch dependencies
+      run: zig build --fetch
+      
+    - name: Run tests
+      run: zig build test
+      
+    - name: Build application (ReleaseFast for Windows)
+      run: zig build -Doptimize=ReleaseFast
+      
+    - name: Verify build output
+      run: |
+        ls zig-out/bin/
+        if (Test-Path "zig-out/bin/tag.exe") { 
+          Write-Host "✓ Build successful: tag.exe created"
+          Get-Item "zig-out/bin/tag.exe" | Select-Object Name, Length, LastWriteTime
+        } else { 
+          Write-Host "✗ Build failed: tag.exe not found"
+          exit 1
+        }
+      shell: pwsh
+      
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: ${{ steps.version.outputs.tag }}
+        body: |
+          **Version:** `${{ steps.version.outputs.tag }}`
+          **Build:** ReleaseFast mode
+          **Target:** x86_64-windows
+        files: zig-out/bin/tag.exe
+        draft: false
+        prerelease: false
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Upload Windows executable (artifact backup)
+      uses: actions/upload-artifact@v4
+      with:
+        name: tag-${{ steps.version.outputs.tag }}-release
+        path: zig-out/bin/tag.exe
+        retention-days: 30 
