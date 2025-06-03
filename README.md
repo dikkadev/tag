@@ -2,6 +2,8 @@
 
 A fast, lightweight Windows application for generating XML tags with attributes through a simple text interface.
 
+![Tag - XML Generator UI screenshot](.github/screenshot.png)
+
 ## Features
 
 - **Real-time XML generation** - Type and see XML output instantly
